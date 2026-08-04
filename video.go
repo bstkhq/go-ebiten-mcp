@@ -15,42 +15,75 @@ import (
 
 // saveVideo writes the recording as a file a person can watch.
 //
-// ffmpeg is used when it is there, because H.264 keeps the game's own colours
-// and costs almost nothing in size. The GIF fallback quantises to 256 colours
-// and is noticeably worse, but it needs nothing beyond the standard library,
-// and a mediocre video beats a missing one when the point is to show somebody
-// what the change looks like.
-func (s *Server) saveVideo(frames []*Frame) (*Artifact, error) {
+// The format is worth choosing rather than defaulting. H.264 keeps the game's
+// colours and costs almost nothing in size, which is what you want to actually
+// watch something. A GIF is worse at both and plays inline in a README, an
+// issue and most chat windows, which is what you want to show something.
+//
+// Both go through ffmpeg when it is there, because its generated palette makes
+// a GIF that looks like the game rather than like 1998. Without ffmpeg only the
+// standard library's fixed palette is left; it is noticeably worse, and a
+// mediocre recording still beats a missing one.
+func (s *Server) saveVideo(frames []*Frame, format string) (*Artifact, error) {
 	if len(frames) == 0 {
 		return nil, fmt.Errorf("nothing to encode")
 	}
 
-	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		return s.saveMP4(frames)
+	_, err := exec.LookPath("ffmpeg")
+	haveFFmpeg := err == nil
+
+	switch format {
+	case "gif":
+		if haveFFmpeg {
+			return s.encodeWithFFmpeg(frames, "gif")
+		}
+		return s.saveGIF(frames)
+
+	case "", "mp4":
+		if haveFFmpeg {
+			return s.encodeWithFFmpeg(frames, "mp4")
+		}
+		// Asked for mp4 and cannot make one; a gif is closer to the intent
+		// than an error.
+		return s.saveGIF(frames)
+
+	default:
+		return nil, fmt.Errorf("unknown video format %q: mp4 or gif", format)
 	}
-	return s.saveGIF(frames)
 }
 
-func (s *Server) saveMP4(frames []*Frame) (*Artifact, error) {
+func (s *Server) encodeWithFFmpeg(frames []*Frame, format string) (*Artifact, error) {
 	b := frames[0].Image.Bounds()
-	name := fmt.Sprintf("rec-%04d.mp4", artifactSeq.Add(1))
+	name := fmt.Sprintf("rec-%04d.%s", artifactSeq.Add(1), format)
 	path := filepath.Join(s.media.dir, name)
 
-	cmd := exec.Command("ffmpeg",
+	args := []string{
 		"-hide_banner", "-loglevel", "error", "-y",
 		"-f", "rawvideo",
 		"-pix_fmt", "rgba",
-		"-s", strconv.Itoa(b.Dx())+"x"+strconv.Itoa(b.Dy()),
+		"-s", strconv.Itoa(b.Dx()) + "x" + strconv.Itoa(b.Dy()),
 		"-r", "60",
 		"-i", "-",
-		// yuv420p is what every player can decode, and it insists on even
-		// dimensions, which a game's logical resolution does not promise.
-		"-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-		"-pix_fmt", "yuv420p",
-		"-c:v", "libx264",
-		"-preset", "veryfast",
-		path,
-	)
+	}
+
+	if format == "gif" {
+		// One pass over the frames, generating a palette from them and applying
+		// it. A GIF quantised against a palette built from the actual colours
+		// looks like the game; the standard 216-colour web palette does not.
+		args = append(args,
+			"-filter_complex",
+			"[0:v] fps=25,split [a][b];[a] palettegen=stats_mode=diff [p];[b][p] paletteuse=dither=bayer:bayer_scale=3")
+	} else {
+		args = append(args,
+			// yuv420p is what every player can decode, and it insists on even
+			// dimensions, which a game's logical resolution does not promise.
+			"-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+			"-pix_fmt", "yuv420p",
+			"-c:v", "libx264",
+			"-preset", "veryfast")
+	}
+
+	cmd := exec.Command("ffmpeg", append(args, path)...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -82,7 +115,7 @@ func (s *Server) saveMP4(frames []*Frame) (*Artifact, error) {
 
 	art := &Artifact{
 		Path:   path,
-		Kind:   "mp4",
+		Kind:   format,
 		Width:  b.Dx(),
 		Height: b.Dy(),
 		Bytes:  int(info.Size()),

@@ -125,11 +125,12 @@ func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool
 // ---------------------------------------------------------------------------
 
 type recordInput struct {
-	Frames  int  `json:"frames,omitempty" jsonschema:"how many drawn frames to record; defaults to 60. Note that a frame is one Draw, which without vsync can happen several times per tick"`
-	Every   int  `json:"every,omitempty" jsonschema:"keep one frame out of every N captured; defaults to 1"`
-	Columns int  `json:"columns,omitempty" jsonschema:"columns in the contact sheet; defaults to 4"`
-	Cells   int  `json:"cells,omitempty" jsonschema:"how many frames to put in the contact sheet; defaults to 12"`
-	NoVideo bool `json:"no_video,omitempty" jsonschema:"skip writing the video file and only produce the contact sheet"`
+	Frames  int    `json:"frames,omitempty" jsonschema:"how many drawn frames to record; defaults to 60. Note that a frame is one Draw, which without vsync can happen several times per tick"`
+	Every   int    `json:"every,omitempty" jsonschema:"keep one frame out of every N captured; defaults to 1"`
+	Columns int    `json:"columns,omitempty" jsonschema:"columns in the contact sheet; defaults to 4"`
+	Cells   int    `json:"cells,omitempty" jsonschema:"how many frames to put in the contact sheet; defaults to 12"`
+	Format  string `json:"format,omitempty" jsonschema:"mp4 for something to watch, gif for something that plays inline in a README or an issue; defaults to mp4"`
+	NoVideo bool   `json:"no_video,omitempty" jsonschema:"skip writing the video file and only produce the contact sheet"`
 }
 
 func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recordInput) (*mcpsdk.CallToolResult, any, error) {
@@ -189,7 +190,7 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 		len(frames), frames[0].Tick, frames[len(frames)-1].Tick)
 
 	if !in.NoVideo {
-		video, err := s.saveVideo(frames)
+		video, err := s.saveVideo(frames, in.Format)
 		if err != nil {
 			note += "\nno video: " + err.Error()
 		} else {

@@ -190,9 +190,10 @@ func startDisplay(opts runOptions) (string, string, func(), error) {
 		local = "weston"
 	}
 
-	_, haveLocal := exec.LookPath(local)
+	_, err := exec.LookPath(local)
+	haveLocal := err == nil
 
-	useContainer := opts.mode == "container" || (opts.mode == "auto" && haveLocal != nil)
+	useContainer := opts.mode == "container" || (opts.mode == "auto" && !haveLocal)
 	if useContainer {
 		x := newXOptions()
 		x.gpu, x.screen = opts.gpu, opts.screen
@@ -209,7 +210,7 @@ func startDisplay(opts runOptions) (string, string, func(), error) {
 		return display, "started an X server in a container", func() { stopXContainer(x) }, nil
 	}
 
-	if haveLocal != nil {
+	if !haveLocal {
 		return "", "", nil, fmt.Errorf("%s is not installed and --x=local was asked for; %s",
 			local, installHint(local))
 	}

@@ -45,8 +45,10 @@ line left in a shipped build. `ebitenmcp find` lists what is running locally.
 **Look at it.** `game_screenshot` returns the frame inline at the game's own
 resolution, and writes a lossless PNG. `game_record` returns a *contact sheet* —
 a grid of frames labelled with their tick, which is how motion can actually be
-read in a conversation — and writes an MP4 next to it for a person to watch.
-`game_compare` puts a before, an after and their difference in one image.
+read in a conversation — and writes a video next to it: `format: "mp4"` for
+something to watch, `format: "gif"` for something that plays inline in a README
+or an issue. `game_compare` puts a before, an after and their difference in one
+image.
 
 **Drive it.** `game_key`, `game_type`, `game_mouse` and `game_touch` synthesise
 input the game cannot tell from the real thing: held keys have durations, drags
