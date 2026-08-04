@@ -1,0 +1,44 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      # Ebitengine needs cgo headers for GLFW to build at all, and a display to
+      # run. The build needs the first; the suite needs both.
+      - name: Install build and display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc libgl1-mesa-dev libxrandr-dev libxcursor-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev \
+            xvfb ffmpeg
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # The escape hatch has to keep compiling, or it is not an escape hatch.
+      - run: go build -tags ebitenmcp_nohook ./...
+
+      # This one runs without a display: it is the check that catches a change
+      # to the Ebitengine struct internal/hook mirrors, and it is the cheapest
+      # thing in the project.
+      - name: Upstream layout
+        run: go test ./internal/upstream/
+
+      # ebitenmcp run is what a project using this library would use, so CI uses
+      # it too rather than reaching for xvfb-run directly. The runner has Xvfb
+      # from apt, so it takes the local path and never builds a container.
+      - name: Suite
+        run: make test

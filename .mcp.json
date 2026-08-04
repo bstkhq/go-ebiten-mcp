@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "game": {
+      "type": "http",
+      "url": "http://127.0.0.1:8384/mcp"
+    },
+    "game-control": {
+      "command": "go",
+      "args": ["run", "./cmd/ebitenmcp", "mcp", "--start", "go run ./examples/playground"]
+    }
+  }
+}
