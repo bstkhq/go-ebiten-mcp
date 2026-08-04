@@ -1,0 +1,369 @@
+package main
+
+import (
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// `ebitenmcp x` runs an X server in a container so that a machine without one
+// can still draw.
+//
+// It is the fallback, not the main event. Debugging a game usually means
+// attaching to one that is already running on a machine that already has a
+// screen. This is for the other case: tests, CI, a server, an agent — where
+// there is no display and often no way to install one.
+//
+// The game never runs in here. It runs wherever you build it and connects over
+// the socket in /tmp/.X11-unix, so nothing about your binary's libraries is
+// this container's business.
+//
+//	ebitenmcp x start [--gpu]    # prints the DISPLAY to use
+//	ebitenmcp x stop
+//	ebitenmcp x status
+
+//go:embed xserver.Containerfile
+var xserverContainerfile []byte
+
+// x11SocketDir is shared between the container and everything that draws. On
+// Linux it is world-writable and sticky, which is what makes this work without
+// privileges.
+const x11SocketDir = "/tmp/.X11-unix"
+
+type xOptions struct {
+	gpu    bool
+	screen string
+	image  string
+	engine string
+	name   string
+}
+
+func newXOptions() xOptions {
+	return xOptions{screen: "1280x720", name: "ebitenmcp-x"}
+}
+
+func xCommand(args []string) error {
+	opts := newXOptions()
+
+	if len(args) == 0 {
+		return fmt.Errorf("x needs start, stop or status")
+	}
+	action := args[0]
+	args = args[1:]
+
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		flag := args[0]
+		args = args[1:]
+
+		if flag == "--gpu" {
+			opts.gpu = true
+			continue
+		}
+		if len(args) == 0 {
+			return fmt.Errorf("%s needs a value", flag)
+		}
+		value := args[0]
+		args = args[1:]
+
+		switch flag {
+		case "--screen":
+			opts.screen = value
+		case "--image":
+			opts.image = value
+		case "--name":
+			opts.name = value
+		default:
+			return fmt.Errorf("unknown flag %q", flag)
+		}
+	}
+
+	switch action {
+	case "start":
+		display, started, err := startXContainer(opts)
+		if err != nil {
+			return err
+		}
+
+		what := "X server on"
+		if !started {
+			what = "reusing the X server already on"
+		}
+
+		fmt.Println(display)
+		fmt.Fprintf(os.Stderr, "ebitenmcp: %s %s, rendering with %s\n"+
+			"ebitenmcp: use it with DISPLAY=%s, and stop it with `ebitenmcp x stop`\n",
+			what, display, renderer(display), display)
+		return nil
+
+	case "stop":
+		return stopXContainer(opts)
+
+	case "status":
+		return xStatus(opts)
+
+	default:
+		return fmt.Errorf("x takes start, stop or status, not %q", action)
+	}
+}
+
+// containerEngine finds something that can run a container.
+func containerEngine(preferred string) (string, error) {
+	candidates := []string{"podman", "docker"}
+	if preferred != "" {
+		candidates = []string{preferred}
+	}
+
+	for _, name := range candidates {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("neither podman nor docker is installed; " +
+		"with weston and xwayland installed locally no container is needed, " +
+		"and a machine that already has a display needs none of this")
+}
+
+// imageTag names the image after the contents of the Containerfile, so editing
+// it rebuilds and leaving it alone does not.
+func imageTag() string {
+	sum := sha256.Sum256(xserverContainerfile)
+	return "ebitenmcp-x:" + hex.EncodeToString(sum[:])[:12]
+}
+
+// ensureImage builds the image if it is not already there.
+func ensureImage(engine string, opts xOptions) (string, error) {
+	if opts.image != "" {
+		return opts.image, nil
+	}
+
+	tag := imageTag()
+	if exec.Command(engine, "image", "exists", tag).Run() == nil {
+		return tag, nil
+	}
+	// docker has no `image exists`; inspect answers the same question.
+	if exec.Command(engine, "image", "inspect", tag).Run() == nil {
+		return tag, nil
+	}
+
+	dir, err := os.MkdirTemp("", "ebitenmcp-x")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+
+	path := filepath.Join(dir, "Containerfile")
+	if err := os.WriteFile(path, xserverContainerfile, 0o644); err != nil {
+		return "", err
+	}
+
+	fmt.Fprintf(os.Stderr, "ebitenmcp: building the X server image %s, once\n", tag)
+
+	build := exec.Command(engine, "build", "-t", tag, "-f", path, dir)
+	build.Stdout, build.Stderr = os.Stderr, os.Stderr
+
+	if err := build.Run(); err != nil {
+		return "", fmt.Errorf("building %s: %w", tag, err)
+	}
+	return tag, nil
+}
+
+var xwaylandDisplay = regexp.MustCompile(`xserver listening on display (:\d+)`)
+
+// startXContainer brings up the server and returns the display to point at,
+// along with whether this call is the one that started it.
+//
+// That second value matters: a caller that reused somebody else's server has no
+// business stopping it on the way out.
+func startXContainer(opts xOptions) (display string, started bool, err error) {
+	engine, err := containerEngine(opts.engine)
+	if err != nil {
+		return "", false, err
+	}
+
+	if display, ok := runningDisplay(engine, opts); ok {
+		return display, false, nil
+	}
+
+	// A container left behind by an earlier run whose display is gone.
+	exec.Command(engine, "rm", "-f", opts.name).Run()
+
+	image, err := ensureImage(engine, opts)
+	if err != nil {
+		return "", false, err
+	}
+
+	width, height, err := splitScreen(opts.screen)
+	if err != nil {
+		return "", false, err
+	}
+
+	run := []string{
+		"run", "-d", "--name", opts.name,
+		"-v", x11SocketDir + ":" + x11SocketDir,
+	}
+	if opts.gpu {
+		run = append(run, "--device", "/dev/dri/renderD128")
+	}
+	run = append(run, image, "sh", "-c", westonCommand(opts, width, height))
+
+	out, err := exec.Command(engine, run...).CombinedOutput()
+	if err != nil {
+		return "", false, fmt.Errorf("starting the X server: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	display, err = waitForXwayland(engine, opts.name)
+	if err != nil {
+		logs, _ := exec.Command(engine, "logs", opts.name).CombinedOutput()
+		exec.Command(engine, "rm", "-f", opts.name).Run()
+		return "", false, fmt.Errorf("%w\n%s", err, tail(string(logs), 15))
+	}
+	return display, true, nil
+}
+
+// westonCommand is the whole of the logic that runs inside the container, and
+// it is composed here rather than baked into the image so that the image stays
+// a set of packages.
+//
+// The lock files are the non-obvious part. Weston picks its X display number
+// itself, and decides a number is free by looking for /tmp/.X<n>-lock in its own
+// filesystem — where the host's locks are not, because only the socket directory
+// is shared. Left alone it therefore tries :0, finds the host's socket already
+// bound, and gives up rather than trying :1. Creating a lock for every socket it
+// can see makes it skip the taken numbers.
+func westonCommand(opts xOptions, width, height string) string {
+	renderer := "pixman"
+	if opts.gpu {
+		renderer = "gl"
+	}
+
+	return fmt.Sprintf(`set -e
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+for socket in %[1]s/X*; do
+    [ -e "$socket" ] || continue
+    touch "/tmp/.X${socket##*/X}-lock"
+done
+exec weston --backend=headless --renderer=%[2]s --xwayland --width=%[3]s --height=%[4]s`,
+		x11SocketDir, renderer, width, height)
+}
+
+func waitForXwayland(engine, name string) (string, error) {
+	deadline := time.Now().Add(60 * time.Second)
+
+	for time.Now().Before(deadline) {
+		logs, err := exec.Command(engine, "logs", name).CombinedOutput()
+		if err == nil {
+			if m := xwaylandDisplay.FindStringSubmatch(string(logs)); m != nil {
+				if err := waitForDisplay(m[1]); err != nil {
+					return "", err
+				}
+				return m[1], nil
+			}
+			if strings.Contains(string(logs), "fatal:") {
+				return "", fmt.Errorf("the X server failed to start")
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return "", fmt.Errorf("the X server never reported a display")
+}
+
+// runningDisplay reports the display of an already-running container, if its
+// socket is still there.
+func runningDisplay(engine string, opts xOptions) (string, bool) {
+	state, err := exec.Command(engine, "inspect", "-f", "{{.State.Running}}", opts.name).Output()
+	if err != nil || strings.TrimSpace(string(state)) != "true" {
+		return "", false
+	}
+
+	logs, err := exec.Command(engine, "logs", opts.name).CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+
+	m := xwaylandDisplay.FindStringSubmatch(string(logs))
+	if m == nil {
+		return "", false
+	}
+	if _, err := os.Stat(socketPath(m[1])); err != nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+func stopXContainer(opts xOptions) error {
+	engine, err := containerEngine(opts.engine)
+	if err != nil {
+		return err
+	}
+
+	// Read the display before killing the container: the socket it created
+	// lives in the shared directory and outlives it, so display numbers would
+	// creep upwards forever as stale files accumulated.
+	display, running := runningDisplay(engine, opts)
+
+	out, err := exec.Command(engine, "rm", "-f", opts.name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("stopping the X server: %s", strings.TrimSpace(string(out)))
+	}
+	if running {
+		os.Remove(socketPath(display))
+	}
+
+	fmt.Fprintln(os.Stderr, "ebitenmcp: X server stopped")
+	return nil
+}
+
+func xStatus(opts xOptions) error {
+	engine, err := containerEngine(opts.engine)
+	if err != nil {
+		return err
+	}
+
+	display, ok := runningDisplay(engine, opts)
+	if !ok {
+		fmt.Println("no X server running")
+		return nil
+	}
+
+	fmt.Printf("display  %s\nsocket   %s\nrenderer %s\nimage    %s\n",
+		display, socketPath(display), renderer(display), imageTag())
+	return nil
+}
+
+func socketPath(display string) string {
+	return filepath.Join(x11SocketDir, "X"+strings.TrimPrefix(display, ":"))
+}
+
+// takenDisplays lists the display numbers that already have a socket, which is
+// what both this process and the container use to stay out of each other's way.
+func takenDisplays() map[int]bool {
+	taken := map[int]bool{}
+
+	entries, err := os.ReadDir(x11SocketDir)
+	if err != nil {
+		return taken
+	}
+
+	for _, entry := range entries {
+		if n, err := strconv.Atoi(strings.TrimPrefix(entry.Name(), "X")); err == nil {
+			taken[n] = true
+		}
+	}
+	return taken
+}
+
+func tail(s string, lines int) string {
+	all := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(all) > lines {
+		all = all[len(all)-lines:]
+	}
+	return strings.Join(all, "\n")
+}
