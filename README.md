@@ -47,7 +47,8 @@ resolution, and writes a lossless PNG. `game_record` returns a *contact sheet* â
 a grid of frames labelled with their tick, which is how motion can actually be
 read in a conversation â€” and writes a video next to it: `format: "mp4"` for
 something to watch, `format: "gif"` for something that plays inline in a README
-or an issue. `game_compare` puts a before, an after and their difference in one
+or an issue. A client that animates gifs can have one back directly, with
+`inline: "gif"`. `game_compare` puts a before, an after and their difference in one
 image.
 
 **Drive it.** `game_key`, `game_type`, `game_mouse` and `game_touch` synthesise

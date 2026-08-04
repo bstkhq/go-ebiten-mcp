@@ -220,7 +220,7 @@ func callNamed(ctx context.Context, session *mcpsdk.ClientSession, out, file, na
 		case *mcpsdk.ImageContent:
 			path := file
 			if path == "" {
-				path = filepath.Join(out, fmt.Sprintf("%s-%d.png", name, images))
+				path = filepath.Join(out, fmt.Sprintf("%s-%d%s", name, images, extensionFor(c.MIMEType)))
 			}
 			if err := os.WriteFile(path, c.Data, 0o644); err != nil {
 				return err
@@ -281,6 +281,22 @@ func find() error {
 		fmt.Printf("%-16s pid %-8d %s%s\n    %s\n", d.Name, d.PID, d.URL, alive, d.CWD)
 	}
 	return nil
+}
+
+// extensionFor names a file after what is actually in it. Writing a gif as
+// .png works in most viewers, which sniff the contents, and is wrong everywhere
+// it is read by name.
+func extensionFor(mime string) string {
+	switch mime {
+	case "image/gif":
+		return ".gif"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 func firstLine(s string) string {

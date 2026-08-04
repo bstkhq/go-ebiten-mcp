@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"os"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -130,6 +131,7 @@ type recordInput struct {
 	Columns int    `json:"columns,omitempty" jsonschema:"columns in the contact sheet; defaults to 4"`
 	Cells   int    `json:"cells,omitempty" jsonschema:"how many frames to put in the contact sheet; defaults to 12"`
 	Format  string `json:"format,omitempty" jsonschema:"mp4 for something to watch, gif for something that plays inline in a README or an issue; defaults to mp4"`
+	Inline  string `json:"inline,omitempty" jsonschema:"what to return in the reply: 'sheet' for a grid of frames with their ticks, or 'gif' for the animation itself, which some clients play and some show as a single frame; defaults to sheet"`
 	NoVideo bool   `json:"no_video,omitempty" jsonschema:"skip writing the video file and only produce the contact sheet"`
 }
 
@@ -145,6 +147,9 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 	}
 	if in.Cells <= 0 {
 		in.Cells = 12
+	}
+	if in.Inline == "gif" && in.Format == "" {
+		in.Format = "gif"
 	}
 
 	// Recording is the one thing that legitimately takes a while, so the budget
@@ -199,6 +204,27 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 			if video.URL != "" {
 				note += "\n" + video.URL
 			}
+		}
+	}
+
+	// The animation itself, for a client that plays it. Where one does, it beats
+	// a grid of stills at showing motion; where one does not, it shows a single
+	// frame and the contact sheet is the better answer — which is why this is a
+	// choice rather than a default.
+	if in.Inline == "gif" {
+		if video, ok := out["video"].(*Artifact); ok && video.Kind == "gif" {
+			data, err := os.ReadFile(video.Path)
+			if err == nil {
+				return &mcpsdk.CallToolResult{
+					Content: []mcpsdk.Content{
+						&mcpsdk.ImageContent{Data: data, MIMEType: "image/gif"},
+						&mcpsdk.TextContent{Text: note + "\n" + sheetArt.Path},
+					},
+				}, out, nil
+			}
+			note += "\ncould not read the gif back: " + err.Error()
+		} else {
+			note += "\nno gif was produced, so the contact sheet is what came back"
 		}
 	}
 
