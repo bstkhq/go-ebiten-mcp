@@ -36,9 +36,14 @@ golden:
 
 # The same suite on the GPU. Worth running before trusting any timing, and worth
 # knowing that a golden recorded under one renderer may not match under another.
+#
+# -count=1 is not optional. Go's test cache tracks the environment variables a
+# test reads, and DISPLAY is not one of them: ebiten picks it up through cgo, so
+# a cached result from the software run would be served here and this target
+# would quietly test nothing at all.
 .PHONY: test-gpu
 test-gpu:
-	$(RUN) --gpu -- go test ./... $(TESTFLAGS)
+	$(RUN) --gpu -- go test -count=1 ./... $(TESTFLAGS)
 
 .PHONY: run
 run:
