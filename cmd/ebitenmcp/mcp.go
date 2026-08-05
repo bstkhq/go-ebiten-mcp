@@ -46,35 +46,19 @@ type controlOptions struct {
 }
 
 func mcpCommand(args []string, url string) error {
-	opts := controlOptions{url: url, screen: "1280x720", addr: defaultAddr, mode: "auto"}
+	opts := controlOptions{url: url, screen: defaultScreen, addr: defaultAddr, mode: "auto"}
 
-	for len(args) >= 1 && strings.HasPrefix(args[0], "-") {
-		flag := args[0]
-		args = args[1:]
-
-		if flag == "--gpu" {
-			opts.gpu = true
-			continue
-		}
-		if len(args) == 0 {
-			return fmt.Errorf("%s needs a value", flag)
-		}
-		value := args[0]
-		args = args[1:]
-
-		switch flag {
-		case "--start":
-			opts.start = value
-		case "--screen":
-			opts.screen = value
-		case "--x":
-			opts.mode = value
-		case "--addr":
-			opts.addr = value
-			opts.url = "http://" + value + Path
-		default:
-			return fmt.Errorf("unknown flag %q", flag)
-		}
+	if _, err := parseFlags(args, map[string]flagSpec{
+		"--gpu":    boolFlag(func() { opts.gpu = true }),
+		"--start":  stringFlag(func(v string) { opts.start = v }),
+		"--screen": stringFlag(func(v string) { opts.screen = v }),
+		"--x":      checkedFlag(func(v string) error { return setXMode(&opts.mode, v) }),
+		"--addr": stringFlag(func(v string) {
+			opts.addr = v
+			opts.url = "http://" + v + Path
+		}),
+	}); err != nil {
+		return err
 	}
 
 	c := &control{opts: opts}

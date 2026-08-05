@@ -104,20 +104,17 @@ func run(args []string) error {
 	}
 	out := "."
 
-	// The global flags, which come before the subcommand. A loop with a goto out
-	// of its own switch is one way to write this; a loop that stops when it stops
-	// recognising things is the same thing without the label.
-	for len(args) >= 2 {
-		switch args[0] {
-		case "-url", "--url":
-			url, args = args[1], args[2:]
-			continue
-		case "-out", "--out":
-			out, args = args[1], args[2:]
-			continue
-		}
-		break
+	// The global flags, which come before the subcommand.
+	rest, err := parseFlags(args, map[string]flagSpec{
+		"-url":  stringFlag(func(v string) { url = v }),
+		"--url": stringFlag(func(v string) { url = v }),
+		"-out":  stringFlag(func(v string) { out = v }),
+		"--out": stringFlag(func(v string) { out = v }),
+	})
+	if err != nil {
+		return err
 	}
+	args = rest
 
 	if len(args) == 0 {
 		return usage()

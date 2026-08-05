@@ -26,50 +26,37 @@ import (
 // then did four other jobs. The flags stop where `--` is, or at the first
 // argument that is not a flag.
 func parseRunFlags(args []string) (runOptions, []string, error) {
-	opts := runOptions{screen: "1280x720", addr: defaultAddr, mode: "auto"}
+	opts := runOptions{screen: defaultScreen, addr: wire.DefaultAddr, mode: "auto"}
 
-	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
-		flag := args[0]
-		args = args[1:]
-
-		if flag == "--" {
-			return opts, args, nil
-		}
-
-		switch flag {
-		case "--gpu":
-			opts.gpu = true
-			continue
-		case "--keep-display":
-			opts.keep = true
-			continue
-		}
-
-		if len(args) == 0 {
-			return opts, nil, fmt.Errorf("%s needs a value", flag)
-		}
-		value := args[0]
-		args = args[1:]
-
-		switch flag {
-		case "--screen":
-			opts.screen = value
-		case "--display":
-			opts.display = value
-		case "--addr":
-			opts.addr = value
-		case "--x":
-			if value != "local" && value != "container" && value != "auto" {
-				return opts, nil, fmt.Errorf("--x takes local, container or auto, not %q", value)
-			}
-			opts.mode = value
-		default:
-			return opts, nil, fmt.Errorf("unknown flag %q", flag)
-		}
+	rest, err := parseFlags(args, map[string]flagSpec{
+		"--gpu":          boolFlag(func() { opts.gpu = true }),
+		"--keep-display": boolFlag(func() { opts.keep = true }),
+		"--screen":       stringFlag(func(v string) { opts.screen = v }),
+		"--display":      stringFlag(func(v string) { opts.display = v }),
+		"--addr":         stringFlag(func(v string) { opts.addr = v }),
+		"--x":            checkedFlag(func(v string) error { return setXMode(&opts.mode, v) }),
+	})
+	if err != nil {
+		return opts, nil, err
 	}
-
-	return opts, args, nil
+	return opts, rest, nil
 }
+
+// setXMode is shared by `run` and `mcp`, which take the same flag and used to
+// validate it in one of the two.
+func setXMode(mode *string, v string) error {
+	switch v {
+	case "local", "container", "auto":
+		*mode = v
+		return nil
+	default:
+		return fmt.Errorf("--x takes local, container or auto, not %q", v)
+	}
+}
+
+// defaultScreen is the size of the display started when there is none. Big
+// enough for a game to lay out normally, small enough to read back quickly.
+const defaultScreen = "1280x720"
 
 // `ebitenmcp run` starts a display and runs a command against it.
 //

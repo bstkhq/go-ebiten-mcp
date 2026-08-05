@@ -99,7 +99,7 @@ type xOptions struct {
 }
 
 func newXOptions() xOptions {
-	return xOptions{screen: "1280x720", name: "ebitenmcp-x"}
+	return xOptions{screen: defaultScreen, name: "ebitenmcp-x"}
 }
 
 func xCommand(args []string) error {
@@ -111,30 +111,13 @@ func xCommand(args []string) error {
 	action := args[0]
 	args = args[1:]
 
-	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
-		flag := args[0]
-		args = args[1:]
-
-		if flag == "--gpu" {
-			opts.gpu = true
-			continue
-		}
-		if len(args) == 0 {
-			return fmt.Errorf("%s needs a value", flag)
-		}
-		value := args[0]
-		args = args[1:]
-
-		switch flag {
-		case "--screen":
-			opts.screen = value
-		case "--image":
-			opts.image = value
-		case "--name":
-			opts.name = value
-		default:
-			return fmt.Errorf("unknown flag %q", flag)
-		}
+	if _, err := parseFlags(args, map[string]flagSpec{
+		"--gpu":    boolFlag(func() { opts.gpu = true }),
+		"--screen": stringFlag(func(v string) { opts.screen = v }),
+		"--image":  stringFlag(func(v string) { opts.image = v }),
+		"--name":   stringFlag(func(v string) { opts.name = v }),
+	}); err != nil {
+		return err
 	}
 
 	switch action {
