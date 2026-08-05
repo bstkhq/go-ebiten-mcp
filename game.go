@@ -30,6 +30,11 @@ type wrapper struct {
 	// player's image ends up. It describes the wrapper, not the game inside it:
 	// SetGame can swap in a game that draws no final screen, and Ebitengine will
 	// still call ours because the assertion is on the wrapper.
+	//
+	// A copy of what captures holds, and the only one: Draw reads it on every
+	// frame and taking a lock there to learn something decided before the loop
+	// started would be a lock in the hot path for no answer that can change.
+	// wrap sets both, one line apart.
 	hasFinal bool
 
 	// final is the image the game's final pass is redirected into when somebody
@@ -446,12 +451,14 @@ func wrap(rt *Runtime) ebiten.Game {
 	base.hasFinal = finalScreen
 
 	rt.mu.Lock()
-	rt.hasFinal, rt.hasLayoutF = finalScreen, layoutF
+	rt.hasLayoutF = layoutF
 	rt.mu.Unlock()
 
-	// The capture queue needs to know too: it is what decides whether asking for
-	// the final stage means a second image or the same one. Set before the loop
-	// starts, like the rest of this.
+	// The capture queue owns the FinalScreenDrawer half, since it is what has to
+	// decide whether asking for the final stage means a second image or the same
+	// one; everything else reads it from there. The wrapper keeps its own copy
+	// only because Draw consults it on every frame and a lock there would be a
+	// lock in the hot path — see the field's comment.
 	rt.captures.hasFinal = finalScreen
 
 	switch {

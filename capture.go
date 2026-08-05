@@ -248,9 +248,10 @@ func (r *Runtime) captureWanted() bool {
 // It is also the single place the ring's frame counter advances, which is why
 // it must be called exactly once per drawn frame.
 func (r *Runtime) beginCapture() capturePlan {
+	hasFinal := r.captures.finalPass()
+
 	r.mu.Lock()
 	ring := r.ring
-	hasFinal := r.hasFinal
 	// A crashed game keeps drawing — the wrapper paints the last frame and the
 	// panic over it — and a paused one redraws the same thing forever. Feeding
 	// either to the buffer fills it with identical frames that evict exactly the

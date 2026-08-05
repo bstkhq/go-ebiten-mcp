@@ -76,10 +76,13 @@ type Runtime struct {
 	// Work queued from other goroutines to run inside Update.
 	commands chan func()
 
-	// Which optional interfaces the wrapper was built for. Fixed before the loop
-	// starts and checked by SetGame, since Ebitengine asserts on the wrapper's
-	// concrete type and that cannot change.
-	hasFinal   bool
+	// Whether the wrapper was built for LayoutFer. Fixed before the loop starts
+	// and checked by SetGame, since Ebitengine asserts on the wrapper's concrete
+	// type and that cannot change.
+	//
+	// Its FinalScreenDrawer counterpart lives on captures, which is the only
+	// thing that has to decide anything with it; this reads it from there rather
+	// than keeping a third copy of one fact.
 	hasLayoutF bool
 
 	// Lazily created, so a game nobody looks at pays for none of them.
@@ -390,7 +393,7 @@ func (r *Runtime) canReplace(game ebiten.Game) error {
 	_, finalScreen := game.(ebiten.FinalScreenDrawer)
 
 	r.mu.Lock()
-	wantLayoutF, wantFinal := r.hasLayoutF, r.hasFinal
+	wantLayoutF, wantFinal := r.hasLayoutF, r.captures.finalPass()
 	r.mu.Unlock()
 
 	if layoutF == wantLayoutF && finalScreen == wantFinal {
