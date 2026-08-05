@@ -85,7 +85,21 @@ func mcpCommand(args []string, url string) error {
 
 	c.addTools(server)
 
-	return server.Run(context.Background(), &mcpsdk.StdioTransport{})
+	// The game's own tools, forwarded, so that a client which only speaks stdio
+	// is not left able to start a game and do nothing with it. See proxy.go.
+	c.proxy = newProxy(c, server)
+	c.proxy.restore()
+
+	ctx := context.Background()
+
+	// A game that is already up is the normal case, and asking it now is what
+	// makes the list right from the first request rather than after the first
+	// game_start.
+	if alive(ctx, c.opts.url) {
+		c.proxy.refresh(ctx)
+	}
+
+	return server.Run(ctx, &mcpsdk.StdioTransport{})
 }
 
 // Path is the route the game serves MCP on, spelled out here rather than
@@ -93,10 +107,14 @@ func mcpCommand(args []string, url string) error {
 const Path = "/mcp"
 
 type control struct {
-	opts controlOptions
+	opts  controlOptions
+	proxy *proxy
 
-	mu   sync.Mutex
-	game *exec.Cmd
+	mu      sync.Mutex
+	game    *exec.Cmd
+	out     *tailWriter
+	exited  bool
+	exitErr error
 }
 
 func (c *control) addTools(server *mcpsdk.Server) {
@@ -146,6 +164,7 @@ type emptyInput struct{}
 
 func (c *control) start(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, any, error) {
 	if alive(ctx, c.opts.url) {
+		c.refreshProxy(ctx)
 		return nil, map[string]any{
 			"url":     c.opts.url,
 			"running": true,
@@ -159,34 +178,68 @@ func (c *control) start(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyI
 			`--start "go run ./cmd/yourgame"`, c.opts.url)
 	}
 
-	if err := c.launch(); err != nil {
+	exit, out, err := c.launch()
+	if err != nil {
 		return nil, nil, err
 	}
 
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		if alive(ctx, c.opts.url) {
-			return nil, map[string]any{
-				"url":     c.opts.url,
-				"running": true,
-				"note":    "the game's own tools are served from this URL",
-			}, nil
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
+	deadline := time.After(startTimeout)
+	poll := time.NewTicker(250 * time.Millisecond)
+	defer poll.Stop()
 
-	return nil, nil, fmt.Errorf("the game started but never answered on %s", c.opts.url)
+	for {
+		select {
+		// Watching the process is what turns three very different failures —
+		// does not compile, panics at init, wrong flag — from ninety seconds of
+		// the same unhelpful sentence into an answer, usually in about one.
+		case err := <-exit:
+			return nil, nil, fmt.Errorf("the game %s before it answered on %s.\nWhat it printed:\n%s",
+				exitReason(err), c.opts.url, out.Text(startOutputLines))
+
+		case <-poll.C:
+			if alive(ctx, c.opts.url) {
+				c.refreshProxy(ctx)
+				return nil, map[string]any{
+					"url":     c.opts.url,
+					"running": true,
+					"note": "the game's own tools are served from this URL, and are also " +
+						"forwarded through this server for a client that cannot reach it",
+				}, nil
+			}
+
+		case <-deadline:
+			return nil, nil, fmt.Errorf("the game is still running but never answered on %s within %s.\nWhat it printed:\n%s",
+				c.opts.url, startTimeout, out.Text(startOutputLines))
+
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
 }
+
+const (
+	startTimeout     = 90 * time.Second
+	startOutputLines = 40
+)
 
 // launch runs the game through `ebitenmcp run`, so it gets its display and its
 // server switched on by the same path a person would use.
-func (c *control) launch() error {
+//
+// It returns the channel the exit status arrives on and the buffer holding what
+// the process printed, because those two together are the whole diagnosis when
+// it does not come up.
+func (c *control) launch() (<-chan error, *tailWriter, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	self, err := os.Executable()
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+
+	command, err := splitCommand(c.opts.start)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	args := []string{"run", "--screen", c.opts.screen, "--addr", c.opts.addr, "--x", c.opts.mode}
@@ -194,21 +247,46 @@ func (c *control) launch() error {
 		args = append(args, "--gpu")
 	}
 	args = append(args, "--")
-	args = append(args, strings.Fields(c.opts.start)...)
+	args = append(args, command...)
 
 	cmd := exec.Command(self, args...)
 
-	// Never stdout: that is this server's transport. The game's own output is
-	// worth keeping, so it goes to stderr, and game_traces has it as well.
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	// Never stdout: that is this server's transport. Kept as well as passed on,
+	// so that whatever the game says on its way down is something a tool can
+	// answer with rather than something in a log file.
+	out := newTail(200, os.Stderr)
+	cmd.Stdout, cmd.Stderr = out, out
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting the game with %q: %w", c.opts.start, err)
+		return nil, nil, fmt.Errorf("starting the game with %q: %w", c.opts.start, err)
 	}
 
-	c.game = cmd
+	exit := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+
+		c.mu.Lock()
+		c.exited, c.exitErr = true, err
+		c.mu.Unlock()
+
+		exit <- err
+	}()
+
+	c.game, c.out = cmd, out
+	c.exited, c.exitErr = false, nil
+
 	fmt.Fprintf(os.Stderr, "ebitenmcp: started the game: %s\n", c.opts.start)
-	return nil
+	return exit, out, nil
+}
+
+// exitReason turns a wait error into something worth reading. A game that ran
+// and stopped cleanly is a different problem from one that never compiled, and
+// the exit status is what tells them apart.
+func exitReason(err error) string {
+	if err == nil {
+		return "exited cleanly"
+	}
+	return "failed with " + err.Error()
 }
 
 func (c *control) stop(_ context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, any, error) {
@@ -221,9 +299,26 @@ func (c *control) stop(_ context.Context, _ *mcpsdk.CallToolRequest, _ emptyInpu
 	}
 
 	c.game.Process.Kill()
-	c.game = nil
+	c.game, c.out = nil, nil
+	c.exited, c.exitErr = false, nil
+
+	// The forwarding session points at a process that is being killed. Letting
+	// go of it now means the next call reconnects rather than failing once on a
+	// dead pipe.
+	if c.proxy != nil {
+		c.proxy.disconnect()
+	}
 
 	return nil, map[string]any{"running": false}, nil
+}
+
+// refreshProxy re-reads the game's tool list, which is the one moment it can
+// change. Never fatal: forwarding what was already known is better than
+// refusing to say a game is up.
+func (c *control) refreshProxy(ctx context.Context) {
+	if c.proxy != nil {
+		c.proxy.refresh(ctx)
+	}
 }
 
 func (c *control) status(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, any, error) {
@@ -235,8 +330,19 @@ func (c *control) status(ctx context.Context, _ *mcpsdk.CallToolRequest, _ empty
 	}
 
 	c.mu.Lock()
-	out["started_by_us"] = c.game != nil
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+
+	// Ours only while it is still alive. Reporting a process that died a minute
+	// ago as one we started is how "the game is running" and "the game is
+	// answering" drift apart, and then nothing anybody reads is true.
+	out["started_by_us"] = c.game != nil && !c.exited
+
+	if c.game != nil && c.exited {
+		out["note"] = "the game this server started has since " + exitReason(c.exitErr)
+		if c.out != nil {
+			out["output"] = c.out.Tail(20)
+		}
+	}
 
 	return nil, out, nil
 }

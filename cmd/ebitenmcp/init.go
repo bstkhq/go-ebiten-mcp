@@ -109,9 +109,14 @@ func writeMCPConfig(start string) error {
 		"type": "http",
 		"url":  "http://" + defaultAddr + Path,
 	}
+	// `go run <module>@latest` rather than a bare `ebitenmcp`, which would need
+	// this binary to be on the client's $PATH — and an MCP client started from a
+	// desktop launcher often does not have the $PATH a shell does. That fails as
+	// "command not found", which explains nothing and is nobody's fault. Go
+	// fetches and caches the build once.
 	servers["game-control"] = map[string]any{
-		"command": "ebitenmcp",
-		"args":    []string{"mcp", "--start", start},
+		"command": "go",
+		"args":    []string{"run", modulePath + "/cmd/ebitenmcp@latest", "mcp", "--start", start},
 	}
 
 	data, err := json.MarshalIndent(config, "", "  ")

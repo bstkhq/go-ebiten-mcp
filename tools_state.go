@@ -118,9 +118,26 @@ func (s *Server) state(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*m
 
 	if crash := s.rt.Crash(); crash != nil {
 		out["crash"] = crash
+
+		// What the game printed on its way down, without having to ask for it
+		// separately. The lines around a panic are usually the reason for it,
+		// and needing a second call to see them is needing a second call at
+		// exactly the moment somebody is in a hurry.
+		if lines := s.crashTraces(crash); len(lines) > 0 {
+			out["crash_traces"] = lines
+		}
 	}
 
 	return nil, out, nil
+}
+
+// crashTracesWindow is how far back from the panic to look. A second at sixty
+// ticks a second: enough for whatever led up to it, short enough that the
+// answer is not mostly the game's ordinary chatter.
+const crashTracesWindow = 60
+
+func (s *Server) crashTraces(crash *Crash) []TraceLine {
+	return filterTraces(s.traces.Lines(), "", "", crash.Tick-crashTracesWindow, 40)
 }
 
 func (s *Server) inputStatus() map[string]any {

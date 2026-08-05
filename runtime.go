@@ -31,7 +31,7 @@ type Crash struct {
 	Stack string    `json:"stack"`
 	Tick  int64     `json:"tick"`
 	When  time.Time `json:"when"`
-	Phase string    `json:"phase"` // "update" or "draw"
+	Phase string    `json:"phase"` // "update", "draw" or "final"
 }
 
 // FrameTiming is what one tick cost.
@@ -77,8 +77,10 @@ type Runtime struct {
 
 	commands chan func()
 
-	captures  []chan *Frame
-	lastFrame *Frame
+	captures     []captureRequest
+	lastFrame    *Frame
+	defaultStage Stage
+	hasFinal     bool
 
 	server   *Server
 	gamepads *Gamepads
@@ -124,12 +126,13 @@ func (r *Runtime) Close() error {
 
 func newRuntime(game ebiten.Game) *Runtime {
 	return &Runtime{
-		game:     game,
-		injector: hook.NewInjector(),
-		started:  time.Now(),
-		lastTick: time.Now(),
-		tickCh:   make(chan struct{}),
-		commands: make(chan func(), 64),
+		game:         game,
+		injector:     hook.NewInjector(),
+		started:      time.Now(),
+		lastTick:     time.Now(),
+		tickCh:       make(chan struct{}),
+		commands:     make(chan func(), 64),
+		defaultStage: StageFinal,
 	}
 }
 
@@ -335,6 +338,20 @@ func (r *Runtime) recordDraw(d time.Duration) {
 		return
 	}
 	r.timings[(r.ntimings-1)%frameTimingHistory].Draw = d.Nanoseconds()
+}
+
+// addDraw adds to the draw half of the current tick's timing, for the work that
+// happens after Draw returns: the game's final pass, and the copy a capture of
+// it needs. Keeping it in the same number is what lets game_frametimes answer
+// "is watching this costing me anything".
+func (r *Runtime) addDraw(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.ntimings == 0 {
+		return
+	}
+	r.timings[(r.ntimings-1)%frameTimingHistory].Draw += d.Nanoseconds()
 }
 
 // drainCommands runs everything queued, but only what was already waiting when

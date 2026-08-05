@@ -41,9 +41,33 @@ is already up. For a machine across the network the game listens on `0.0.0.0` an
 the URL points at it; loopback stays the default, which is the right thing for a
 line left in a shipped build. `ebitenmcp find` lists what is running locally.
 
+If your client cannot talk to an HTTP server — plenty only know how to launch a
+command and speak over a pipe — use the control server instead. It needs no
+install of its own, and it forwards the game's tools as well as starting it:
+
+```json
+{ "mcpServers": { "game-control": {
+    "command": "go",
+    "args": ["run", "github.com/bstkhq/go-ebiten-mcp/cmd/ebitenmcp@latest",
+             "mcp", "--start", "go run ./cmd/mygame"] } } }
+```
+
+`ebitenmcp init` writes that file for you, guessing the start command from the
+project, and leaves a note in `CLAUDE.md` so an agent knows the tools are there.
+
+The `go run` form is deliberate: `go install` puts a binary somewhere that has to
+be on `$PATH`, and an MCP client started from a desktop launcher often does not
+inherit the `$PATH` you see in a shell — which fails as "command not found" and
+explains nothing. Go fetches and caches the build once.
+
 ## What you get
-**Look at it.** `game_screenshot` returns the frame inline at the game's own
-resolution, and writes a lossless PNG. `game_record` returns a *contact sheet* —
+**Look at it.** `game_screenshot` returns the frame inline exactly as the player
+sees it, and writes a lossless PNG. That means *after* the game's own
+`DrawFinalScreen` if it has one — a CRT filter, scanlines, a letterbox, a custom
+scaling filter all live in that second pass, and a screenshot taken before it
+would show an image nobody ever saw. `stage: "offscreen"` asks for the one from
+before instead, which is how you tell a bug in the game from a bug in the pass
+over it. `game_record` returns a *contact sheet* —
 a grid of frames labelled with their tick, which is how motion can actually be
 read in a conversation — and writes a video next to it: `format: "mp4"` for
 something to watch, `format: "gif"` for something that plays inline in a README
@@ -69,9 +93,27 @@ makes it something you can paste into an issue.
 **See what led up to it.** `game_record` captures what comes next, which only
 helps with a bug you already know how to reproduce. `game_frames` keeps a rolling
 buffer so the frames *before* a crash are still there when you think to ask. It
-is off by default: enable it, let it run, then ask. Measured on a 480x320 game it
-costs nothing detectable, and the cost scales with resolution, so the buffer
-reports what it is using and how many frames it had to drop.
+is off by default: enable it, let it run, then ask. It reports what it is using
+and how many frames it had to drop, because a buffer quietly keeping half of what
+it was asked to keep would be worse than one that says so.
+
+It also keeps the *offscreen* by default, where a screenshot keeps the final
+screen, and the reason is measured rather than assumed. On a 480x320 game in a
+960x640 window, on a Radeon RX 470:
+
+| | mean draw time |
+|---|---|
+| not capturing | 279 µs |
+| buffering the offscreen | 1.13 ms |
+| buffering the final screen | 2.64 ms |
+| switched off again | 283 µs |
+
+Reading pixels back is a synchronisation point with the GPU, and the final screen
+is the size of the window rather than the logical resolution — twelve times the
+bytes here, through the encoder, for every frame kept. A screenshot pays that
+once and it does not matter; a buffer running for ten minutes pays it thirty-six
+thousand times. Nothing at all is paid while nobody is capturing, which is the
+line that matters for a game in production with the address left set.
 
 **Ask it things.** `game_inspect` walks the game's own state by path,
 *including unexported fields*, because a Go game keeps almost everything
@@ -82,8 +124,9 @@ memory, what it printed, and what each tick cost split into update and draw.
 returns the profile summarised as text, not just a pprof file somebody else would
 have to open.
 
-**And when it breaks.** A panic in the game is caught, recorded with its stack
-and the tick it happened on, and the frame from the moment of the crash is kept.
+**And when it breaks.** A panic in the game is caught, recorded with its stack,
+the tick it happened on and the lines it printed in the second before it — no
+second call needed — and the frame from the moment of the crash is kept.
 The game stops; the server keeps answering. `game_state`, `game_traces` and
 `game_goroutines` never touch the game loop, so they still work when it is
 deadlocked — and they say so, rather than hanging along with it.
@@ -138,7 +181,12 @@ go install github.com/bstkhq/go-ebiten-mcp/cmd/ebitenmcp@latest
 ebitenmcp run go test ./...      # your ebiten tests, headless
 ebitenmcp run ./mygame           # the game, with the server on
 ebitenmcp run --gpu ./mygame     # rendering on the GPU
+ebitenmcp init                   # write .mcp.json and a note in CLAUDE.md
 ```
+
+For a shell or a CI job `go install` is the right shape — you want the binary on
+`$PATH`. For an MCP client it is not: use the `go run …@latest` form above, which
+does not depend on one.
 
 With `DISPLAY` already set it starts nothing and changes nothing — which is the
 desktop case, and the case of a build container run with `--env=DISPLAY`. Without
@@ -304,17 +352,44 @@ not.
 
 ## Compatibility
 
-| this module | Ebitengine |
-|---|---|
-| v0.1.x | v2.9.9 |
+### Ebitengine
 
-The range is narrow on purpose, for the reason above. Raising it means
-re-reading `internal/ui/input.go` and updating the mirror and its checksum in
-`internal/upstream`.
+Pinned to **v2.9.9**. The range is narrow on purpose, for the reason above:
+raising it means re-reading `internal/ui/input.go` and updating the mirror and
+its checksum in `internal/upstream`. There are no tagged releases yet, so
+`@latest` is the version to ask for.
 
-Audio and gamepads are out of scope for now. Gamepad state lives in unexported
-fields of `internal/gamepad`, so the mirror trick does not apply; a virtual
-device through `/dev/uinput` is the sane way in, and it is Linux-only.
+### Platforms
+
+Everything goes through Ebitengine except two things, and those two are the ones
+that reach outside the process:
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| see, drive, pause, inspect, profile | yes | yes | yes |
+| `game_traces` | yes | yes | **no** — it captures descriptors 1 and 2, which needs a unix-like platform |
+| `game_gamepad` | yes | **no** | **no** — a virtual pad is a `/dev/uinput` device |
+| `ebitenmcp x` | yes | **no** | **no** — a containerised X server |
+
+Keyboard, mouse and touch are not in that list on purpose: they go through the
+mirror rather than through the operating system, so they work wherever Go does.
+
+### Your MCP client
+
+Two things matter, and neither is about this project:
+
+- **Tools.** A client with no tool support cannot call any of this. The
+  [official client list](https://modelcontextprotocol.io/clients) has a column
+  for it, and is worth checking there rather than in a copy here that would go
+  stale.
+- **Images.** About half of what comes back is a picture — screenshots, contact
+  sheets, difference images, gifs. A client can support tools perfectly and still
+  render only text, and then all of that arrives as a file path. Where a client
+  does animate gifs, `game_record` with `inline: "gif"` is worth using; where one
+  does not, the contact sheet says more, which is why it is the default.
+
+Transport is not on that list any more: a client that only speaks stdio can use
+`game-control`, which forwards the game's own tools over its own session.
 
 ## Licence
 

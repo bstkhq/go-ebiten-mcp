@@ -55,6 +55,11 @@ type Game struct {
 	current screenID
 	ticks   int
 
+	// crt switches the final-screen pass on, which is the only thing here that
+	// exists in the final screen and not in the offscreen. See crt.go.
+	crt       bool
+	crtShader *ebiten.Shader
+
 	screens struct {
 		menu    *menuScreen
 		player  *playerScreen
@@ -88,14 +93,24 @@ func (g *Game) Update() error {
 	// Every sixtieth tick, a line on stdout. Nothing reads it here: it is there
 	// so the trace ring, which captures the process's own output rather than
 	// asking the game to log through a library, has something to capture.
+	//
+	// The prefix is coloured on purpose. Plenty of loggers colour their output
+	// when they think they are talking to a terminal — and they do think so,
+	// since the capture tees to the real descriptor — so this is what a captured
+	// line actually looks like, and game_traces returning it clean is the proof
+	// that the escapes are being taken out.
 	if g.ticks%60 == 0 {
-		fmt.Printf("playground: tick %d on the %s screen\n", g.ticks, screenNames[g.current])
+		fmt.Printf("\x1b[36mplayground:\x1b[0m tick %d on the %s screen\n", g.ticks, screenNames[g.current])
 	}
 
 	for i := screenMenu; i < screenCount; i++ {
 		if inpututil.IsKeyJustPressed(ebiten.Key1 + ebiten.Key(i)) {
 			g.current = i
 		}
+	}
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyF) {
+		g.crt = !g.crt
 	}
 
 	return g.screen().update(g)

@@ -38,6 +38,11 @@ var xserverContainerfile []byte
 // privileges.
 const x11SocketDir = "/tmp/.X11-unix"
 
+// renderNode is the only piece of the GPU the container is given. A render node
+// is enough for rendering and grants nothing else — no modesetting, no other
+// client's buffers — which is what makes this work without privileges.
+const renderNode = "/dev/dri/renderD128"
+
 type xOptions struct {
 	gpu    bool
 	screen string
@@ -189,7 +194,20 @@ func startXContainer(opts xOptions) (display string, started bool, err error) {
 	}
 
 	if display, ok := runningDisplay(engine, opts); ok {
-		return display, false, nil
+		// Reuse only a server that renders the way this run asked for.
+		//
+		// Reusing one regardless is how `make test-gpu` after `make test` ends
+		// up on llvmpipe: everything passes, nothing was tested on the GPU, and
+		// the only sign is a renderer name in a line nobody reads. The container
+		// is this tool's own, by name, so replacing it is fair — and it says so.
+		if hasGPU(engine, opts.name) == opts.gpu {
+			return display, false, nil
+		}
+
+		fmt.Fprintf(os.Stderr, "ebitenmcp: the X server on %s renders the other way; replacing it\n", display)
+		if err := stopXContainer(opts); err != nil {
+			return "", false, err
+		}
 	}
 
 	// A container left behind by an earlier run whose display is gone.
@@ -210,7 +228,7 @@ func startXContainer(opts xOptions) (display string, started bool, err error) {
 		"-v", x11SocketDir + ":" + x11SocketDir,
 	}
 	if opts.gpu {
-		run = append(run, "--device", "/dev/dri/renderD128")
+		run = append(run, "--device", renderNode)
 	}
 	run = append(run, image, "sh", "-c", westonCommand(opts, width, height))
 
@@ -296,6 +314,19 @@ func runningDisplay(engine string, opts xOptions) (string, bool) {
 		return "", false
 	}
 	return m[1], true
+}
+
+// hasGPU reports whether a running container can reach the render node, which
+// is the whole difference between hardware and llvmpipe.
+//
+// It asks the container rather than the engine on purpose. `inspect` looks like
+// the right way and is not: podman leaves HostConfig.Devices empty for a
+// container started with --device and records it only in Config.CreateCommand,
+// which docker does not have at all. Looking for the file is the same question
+// asked of something that has to answer it honestly.
+func hasGPU(engine, name string) bool {
+	return exec.Command(engine, "exec", name,
+		"sh", "-c", "test -e "+renderNode).Run() == nil
 }
 
 func stopXContainer(opts xOptions) error {

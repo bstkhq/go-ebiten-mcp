@@ -113,11 +113,61 @@ func (t *traceRing) pump(r io.Reader, passthrough io.Writer, name string, tick f
 	for scanner.Scan() {
 		line := scanner.Text()
 
+		// The terminal gets it untouched, escapes and all. Only what is kept for
+		// an agent is stripped, because there the colour is not colour: it is
+		// half a dozen unreadable bytes per line, in a context window somebody
+		// is paying for.
 		if passthrough != nil {
 			io.WriteString(passthrough, line+"\n")
 		}
-		t.add(name, line, tick())
+		t.add(name, stripANSI(line), tick())
 	}
+}
+
+// stripANSI removes terminal control sequences.
+//
+// A game whose logger checks isatty keeps seeing one — the tee hands it the real
+// descriptor — so it goes on emitting colour, and every captured line arrives
+// wrapped in escapes. Deliberately only the escapes: the sequences go and the
+// text stays exactly as it was, tabs, spacing, line breaks and all. Flattening a
+// stack trace to make it tidy would throw away the reason it was captured.
+func stripANSI(s string) string {
+	if !strings.ContainsRune(s, 0x1b) {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != 0x1b {
+			b.WriteRune(runes[i])
+			continue
+		}
+
+		// CSI (ESC [) runs to a byte in @ to ~; OSC (ESC ]) to a BEL or ESC \;
+		// anything else is a two-byte sequence.
+		switch {
+		case i+1 < len(runes) && runes[i+1] == '[':
+			i += 2
+			for i < len(runes) && (runes[i] < '@' || runes[i] > '~') {
+				i++
+			}
+		case i+1 < len(runes) && runes[i+1] == ']':
+			i += 2
+			for i < len(runes) && runes[i] != 0x07 && runes[i] != 0x1b {
+				i++
+			}
+			if i < len(runes) && runes[i] == 0x1b && i+1 < len(runes) && runes[i+1] == '\\' {
+				i++
+			}
+		default:
+			i++
+		}
+	}
+
+	return b.String()
 }
 
 // filter narrows the captured lines the way a caller asked.

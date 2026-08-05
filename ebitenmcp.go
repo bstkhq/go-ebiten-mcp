@@ -12,6 +12,11 @@ import (
 // a release build costs nothing.
 const AddrEnv = "EBITEN_MCP_ADDR"
 
+// CaptureEnv overrides which stage captures come from. Set it to "offscreen" in
+// a game whose final pass is expensive and whose final pass you do not care
+// about; see WithCaptureStage for why that is not the default.
+const CaptureEnv = "EBITEN_MCP_CAPTURE"
+
 // Options configures a wrapped game.
 type Options struct {
 	// Addr is the address the MCP server listens on. Defaults to
@@ -25,6 +30,11 @@ type Options struct {
 	// use to start over. Without it there is nothing to reset to, since
 	// Ebitengine's loop cannot be restarted.
 	Factory func() ebiten.Game
+
+	// CaptureStage is which stage a capture comes from when it does not ask for
+	// one. Defaults to StageFinal, and only means anything for a game that draws
+	// its own final screen.
+	CaptureStage Stage
 }
 
 // Option customises Options.
@@ -45,15 +55,33 @@ func WithFactory(factory func() ebiten.Game) Option {
 	return func(o *Options) { o.Factory = factory }
 }
 
+// WithCaptureStage sets which stage captures come from by default.
+//
+// StageOffscreen skips the screen-sized copy the final pass needs, which is
+// worth having when that pass is expensive and you are not debugging it. It is
+// not the default, because returning the image from before a game's own final
+// pass — without saying so — is returning something the player never saw.
+func WithCaptureStage(stage Stage) Option {
+	return func(o *Options) { o.CaptureStage = stage }
+}
+
 func newOptions(opts []Option) *Options {
 	o := &Options{
-		Addr: os.Getenv(AddrEnv),
-		Name: defaultName(),
+		Addr:         os.Getenv(AddrEnv),
+		Name:         defaultName(),
+		CaptureStage: captureStageFromEnv(),
 	}
 	for _, opt := range opts {
 		opt(o)
 	}
 	return o
+}
+
+func captureStageFromEnv() Stage {
+	if os.Getenv(CaptureEnv) == string(StageOffscreen) {
+		return StageOffscreen
+	}
+	return StageFinal
 }
 
 func defaultName() string {
@@ -85,6 +113,9 @@ func Wrap(game ebiten.Game, opts ...Option) (ebiten.Game, *Runtime) {
 
 	rt := newRuntime(game)
 	rt.factory = o.Factory
+	if o.CaptureStage != "" {
+		rt.defaultStage = o.CaptureStage
+	}
 
 	if o.Addr != "" {
 		server, err := Serve(rt, o)

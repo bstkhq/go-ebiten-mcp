@@ -27,7 +27,7 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 func (s *Server) addViewTools(srv *mcpsdk.Server) {
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name: "game_screenshot",
-		Description: "Capture the next frame the game draws, at its own resolution. " +
+		Description: "Capture the next frame the game draws, exactly as the player sees it. " +
 			"Returns the image inline, plus the path and URL of a lossless PNG on disk.",
 		Annotations: readOnly("Screenshot"),
 	}, s.screenshot)
@@ -52,13 +52,28 @@ func (s *Server) addViewTools(srv *mcpsdk.Server) {
 // game_screenshot
 // ---------------------------------------------------------------------------
 
+// stageDoc is shared by every tool that captures, because the choice is the
+// same one everywhere and describing it three different ways would suggest it
+// was three different things.
+const stageDoc = "which drawing step to read: 'final' for what the player sees, " +
+	"'offscreen' for what the game's own Draw produced before its DrawFinalScreen " +
+	"ran. Only differs for a game that draws its own final screen — where asking " +
+	"for both is how you tell whether a visual bug is in the game or in that pass. " +
+	"Defaults to final"
+
 type screenshotInput struct {
-	WaitTicks   int  `json:"wait_ticks,omitempty" jsonschema:"let the game run this many ticks first"`
-	MaxSize     int  `json:"max_size,omitempty" jsonschema:"longest side of the inline image in pixels; defaults to 1024. The file on disk is always full resolution"`
-	FullQuality bool `json:"full_quality,omitempty" jsonschema:"return the inline image at native resolution, however large that is"`
+	WaitTicks   int    `json:"wait_ticks,omitempty" jsonschema:"let the game run this many ticks first"`
+	MaxSize     int    `json:"max_size,omitempty" jsonschema:"longest side of the inline image in pixels; defaults to 1024. The file on disk is always full resolution"`
+	FullQuality bool   `json:"full_quality,omitempty" jsonschema:"return the inline image at native resolution, however large that is"`
+	Stage       string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
 func (s *Server) screenshot(ctx context.Context, _ *mcpsdk.CallToolRequest, in screenshotInput) (*mcpsdk.CallToolResult, any, error) {
+	stage, err := s.stage(in.Stage)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
@@ -68,12 +83,27 @@ func (s *Server) screenshot(ctx context.Context, _ *mcpsdk.CallToolRequest, in s
 		}
 	}
 
-	frame, err := s.rt.Capture(ctx)
+	frame, err := s.rt.CaptureStage(ctx, stage)
 	if err != nil {
 		return nil, nil, s.stalled(err)
 	}
 
 	return s.frameResult("shot", frame, in.MaxSize, in.FullQuality, "")
+}
+
+// stage turns the argument into a Stage, defaulting to whatever the game was
+// configured with.
+func (s *Server) stage(name string) (Stage, error) {
+	switch Stage(name) {
+	case "":
+		return s.rt.DefaultStage(), nil
+	case StageFinal:
+		return StageFinal, nil
+	case StageOffscreen:
+		return StageOffscreen, nil
+	default:
+		return "", fmt.Errorf("unknown stage %q: %s", name, stageDoc)
+	}
 }
 
 // frameResult produces the three forms every capture comes in: inline for the
@@ -102,6 +132,12 @@ func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool
 	if b.Dx() != art.Width {
 		text += fmt.Sprintf(", shown at %dx%d", b.Dx(), b.Dy())
 	}
+	// Only worth saying when the two stages are actually different images.
+	// Naming a distinction that does not exist for this game would invite
+	// somebody to go looking for it.
+	if s.rt.HasFinalPass() {
+		text += ", " + string(frame.Stage)
+	}
 	if note != "" {
 		text += "\n" + note
 	}
@@ -109,6 +145,7 @@ func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool
 
 	out := map[string]any{
 		"tick":     frame.Tick,
+		"stage":    string(frame.Stage),
 		"artifact": art,
 		"inline":   map[string]int{"width": b.Dx(), "height": b.Dy()},
 	}
@@ -133,9 +170,15 @@ type recordInput struct {
 	Format  string `json:"format,omitempty" jsonschema:"mp4 for something to watch, gif for something that plays inline in a README or an issue; defaults to mp4"`
 	Inline  string `json:"inline,omitempty" jsonschema:"what to return in the reply: 'sheet' for a grid of frames with their ticks, or 'gif' for the animation itself, which some clients play and some show as a single frame; defaults to sheet"`
 	NoVideo bool   `json:"no_video,omitempty" jsonschema:"skip writing the video file and only produce the contact sheet"`
+	Stage   string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
 func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recordInput) (*mcpsdk.CallToolResult, any, error) {
+	stage, err := s.stage(in.Stage)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if in.Frames <= 0 {
 		in.Frames = 60
 	}
@@ -160,7 +203,7 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 
 	frames := make([]*Frame, 0, in.Frames/in.Every+1)
 	for i := 0; i < in.Frames; i++ {
-		frame, err := s.rt.Capture(ctx)
+		frame, err := s.rt.CaptureStage(ctx, stage)
 		if err != nil {
 			if len(frames) == 0 {
 				return nil, nil, s.stalled(err)
@@ -185,6 +228,7 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 
 	out := map[string]any{
 		"frames":        len(frames),
+		"stage":         string(stage),
 		"first_tick":    frames[0].Tick,
 		"last_tick":     frames[len(frames)-1].Tick,
 		"ticks_covered": frames[len(frames)-1].Tick - frames[0].Tick,
@@ -260,10 +304,16 @@ func pick(frames []*Frame, n int) []*Frame {
 // ---------------------------------------------------------------------------
 
 type compareInput struct {
-	WaitTicks int `json:"wait_ticks,omitempty" jsonschema:"ticks to let pass between the two captures; defaults to 30"`
+	WaitTicks int    `json:"wait_ticks,omitempty" jsonschema:"ticks to let pass between the two captures; defaults to 30"`
+	Stage     string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
 func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in compareInput) (*mcpsdk.CallToolResult, any, error) {
+	stage, err := s.stage(in.Stage)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if in.WaitTicks <= 0 {
 		in.WaitTicks = 30
 	}
@@ -271,7 +321,7 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(in.WaitTicks)*100*time.Millisecond+defaultToolTimeout)
 	defer cancel()
 
-	before, err := s.rt.Capture(ctx)
+	before, err := s.rt.CaptureStage(ctx, stage)
 	if err != nil {
 		return nil, nil, s.stalled(err)
 	}
@@ -280,7 +330,7 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 		return nil, nil, s.stalled(err)
 	}
 
-	after, err := s.rt.Capture(ctx)
+	after, err := s.rt.CaptureStage(ctx, stage)
 	if err != nil {
 		return nil, nil, s.stalled(err)
 	}
@@ -331,6 +381,18 @@ func (s *Server) stalled(err error) error {
 	}
 	if crash := s.rt.Crash(); crash != nil {
 		msg += fmt.Sprintf(" (the game panicked in %s: %s — see game_state)", crash.Phase, crash.Value)
+
+		// The last few lines, here rather than only in game_state. An error that
+		// sends you somewhere else to find out what happened costs a round trip
+		// to say what it could have said itself.
+		if lines := s.crashTraces(crash); len(lines) > 0 {
+			if len(lines) > 3 {
+				lines = lines[len(lines)-3:]
+			}
+			for _, l := range lines {
+				msg += "\n  " + l.Text
+			}
+		}
 	}
 	return fmt.Errorf("%s", msg)
 }

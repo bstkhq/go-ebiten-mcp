@@ -16,12 +16,26 @@ import (
 // game loop the process is allowed to have. TestMain owns that loop; the tests
 // drive it through the Runtime, which is the thing under test.
 //
-// probeGame implements LayoutFer so the live path through the optional-interface
-// wrapper is exercised as well. Which wrapper type gets built for each
-// combination is checked separately, in TestWrapSelectsWrapperType, because
-// there is only one loop to run a game in.
+// probeGame implements LayoutFer and FinalScreenDrawer so the live path through
+// the optional-interface wrapper is exercised as well — by every test here,
+// since the wrapper type is fixed for the life of the process. Which type gets
+// built for each combination is checked separately, in
+// TestWrapSelectsWrapperType, because there is only one loop to run a game in.
+//
+// Its final pass paints a marker that exists nowhere else. That is the whole
+// point: it is what tells a capture of the final screen from a capture of the
+// offscreen, and it is what would have caught this being wrong.
 
-var testRT *Runtime
+var (
+	testRT      *Runtime
+	testWrapper *wrapper
+)
+
+// markerColor is drawn only by the final pass, so finding it in a frame proves
+// the frame came from after that pass.
+var markerColor = color.RGBA{R: 0xff, G: 0x00, B: 0xff, A: 0xff}
+
+const markerSize = 8
 
 type probeGame struct {
 	mu sync.Mutex
@@ -30,6 +44,8 @@ type probeGame struct {
 	updates  int
 	blockFor time.Duration
 	panicIn  string
+
+	marker *ebiten.Image
 }
 
 func newProbeGame(fill color.RGBA) *probeGame {
@@ -69,6 +85,18 @@ func (g *probeGame) Layout(int, int) (int, int) { return 64, 48 }
 
 func (g *probeGame) LayoutF(float64, float64) (float64, float64) { return 64, 48 }
 
+// DrawFinalScreen composites the offscreen and then stamps the marker, which is
+// the only place in this game that colour is ever drawn.
+func (g *probeGame) DrawFinalScreen(screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
+	ebiten.DefaultDrawFinalScreen(screen, offscreen, geoM)
+
+	if g.marker == nil {
+		g.marker = ebiten.NewImage(markerSize, markerSize)
+		g.marker.Fill(markerColor)
+	}
+	screen.DrawImage(g.marker, nil)
+}
+
 func (g *probeGame) block(d time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -79,6 +107,12 @@ func (g *probeGame) block(d time.Duration) {
 func TestMain(m *testing.M) {
 	wrapped, rt := Wrap(newProbeGame(color.RGBA{R: 0x20, G: 0x40, B: 0x80, A: 0xff}))
 	testRT = rt
+
+	// The live wrapper, for the one test that has to look at what it is holding.
+	// probeGame implements both optional interfaces, so this is the type Wrap
+	// builds; if that ever stops being true the assertion here says so at once
+	// rather than a test failing for an unrelated-looking reason.
+	testWrapper = wrapped.(*wrapperLayoutFFinalScreen).wrapper
 
 	result := make(chan int, 1)
 	go func() {
@@ -174,7 +208,7 @@ func TestCaptureReturnsTheGamesOwnResolution(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	frame, err := testRT.Capture(ctx)
+	frame, err := testRT.CaptureStage(ctx, StageOffscreen)
 	if err != nil {
 		t.Fatalf("capturing: %v", err)
 	}
@@ -188,6 +222,97 @@ func TestCaptureReturnsTheGamesOwnResolution(t *testing.T) {
 	r, g, b, _ := frame.Image.At(32, 24).RGBA()
 	if abs(int(r>>8)-0x20) > 2 || abs(int(g>>8)-0x40) > 2 || abs(int(b>>8)-0x80) > 2 {
 		t.Errorf("captured pixel is (%d,%d,%d), want roughly (32,64,128)", r>>8, g>>8, b>>8)
+	}
+}
+
+// TestCaptureSeesTheFinalPass is the regression for the bug this file exists to
+// prevent coming back.
+//
+// Ebitengine draws twice — the game's Draw fills an offscreen, then
+// DrawFinalScreen composites it onto the real screen — and capturing at the
+// first step returns an image the player never saw. Any final pass at all
+// hides in that gap: a CRT filter, scanlines, a letterbox, a scaling filter.
+// The marker stands in for all of them.
+//
+// The final screen cannot simply be read: ebiten.FinalScreen has no ReadPixels.
+// So this also covers the mechanism, which is handing the game an image of our
+// own to draw into and blitting it onward.
+func TestCaptureSeesTheFinalPass(t *testing.T) {
+	reset(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	final, err := testRT.CaptureStage(ctx, StageFinal)
+	if err != nil {
+		t.Fatalf("capturing the final screen: %v", err)
+	}
+	offscreen, err := testRT.CaptureStage(ctx, StageOffscreen)
+	if err != nil {
+		t.Fatalf("capturing the offscreen: %v", err)
+	}
+
+	if final.Stage != StageFinal || offscreen.Stage != StageOffscreen {
+		t.Errorf("frames came back labelled %q and %q", final.Stage, offscreen.Stage)
+	}
+
+	// The final screen is the window, which is a scaled-up 64x48. Asserting the
+	// exact size would be asserting the size of whatever window the test
+	// happened to get; that it is bigger is the part that means something.
+	if final.Image.Bounds().Dx() <= offscreen.Image.Bounds().Dx() {
+		t.Errorf("the final screen is %v and the offscreen %v: the final pass is not being read at the screen's own resolution",
+			final.Image.Bounds(), offscreen.Image.Bounds())
+	}
+
+	// Two pixels in, to stay clear of any filtering at the very edge.
+	if r, g, b, _ := final.Image.At(2, 2).RGBA(); abs(int(r>>8)-0xff) > 4 || g>>8 > 4 || abs(int(b>>8)-0xff) > 4 {
+		t.Errorf("the final screen has (%d,%d,%d) where the final pass drew its marker: the capture is from before that pass",
+			r>>8, g>>8, b>>8)
+	}
+
+	// And the same spot in the offscreen is the game's own fill, which is what
+	// makes asking for the offscreen worth doing: it is how you tell a bug in
+	// the game from a bug in the pass over it.
+	if r, g, b, _ := offscreen.Image.At(0, 0).RGBA(); abs(int(r>>8)-0x20) > 2 || abs(int(g>>8)-0x40) > 2 || abs(int(b>>8)-0x80) > 2 {
+		t.Errorf("the offscreen has (%d,%d,%d) at the corner, want the game's own fill: the marker leaked into it",
+			r>>8, g>>8, b>>8)
+	}
+}
+
+// TestFinalCopyIsReleasedWhenIdle covers the other half of the deal. The copy is
+// the size of the window — 33 MB at 4K — and a game that was looked at once must
+// not go on holding it for the rest of its life.
+//
+// The idling is done on the game loop rather than by waiting five seconds for
+// it: those fields belong to the loop, and reaching into them from here would
+// be both a race and a slow test.
+func TestFinalCopyIsReleasedWhenIdle(t *testing.T) {
+	reset(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := testRT.CaptureStage(ctx, StageFinal); err != nil {
+		t.Fatalf("capturing the final screen: %v", err)
+	}
+
+	var held, released bool
+	if err := testRT.Do(ctx, func() {
+		held = testWrapper.final != nil
+
+		for i := 0; i < finalIdleFrames; i++ {
+			testWrapper.releaseFinal()
+		}
+		released = testWrapper.final == nil
+	}); err != nil {
+		t.Fatalf("running on the loop: %v", err)
+	}
+
+	if !held {
+		t.Error("nothing was kept for a capture that asked for the final screen")
+	}
+	if !released {
+		t.Errorf("the copy is still held after %d idle frames", finalIdleFrames)
 	}
 }
 
@@ -340,7 +465,7 @@ func TestWrapSelectsWrapperType(t *testing.T) {
 		wantFinal   bool
 	}{
 		{"plain", &plainGame{}, false, false},
-		{"layoutF", &probeGame{}, true, false},
+		{"layoutF", &layoutFGame{}, true, false},
 		{"finalScreen", &finalScreenGame{}, false, true},
 		{"both", &bothGame{}, true, true},
 	} {
@@ -362,6 +487,10 @@ type plainGame struct{}
 func (*plainGame) Update() error              { return nil }
 func (*plainGame) Draw(*ebiten.Image)         {}
 func (*plainGame) Layout(int, int) (int, int) { return 1, 1 }
+
+type layoutFGame struct{ plainGame }
+
+func (*layoutFGame) LayoutF(float64, float64) (float64, float64) { return 1, 1 }
 
 type finalScreenGame struct{ plainGame }
 

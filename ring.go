@@ -48,6 +48,7 @@ type frameRing struct {
 	enabled bool
 	every   int
 	budget  int
+	stage   Stage
 
 	frames []ringFrame
 	bytes  int
@@ -71,11 +72,26 @@ type pendingFrame struct {
 }
 
 func newFrameRing() *frameRing {
-	return &frameRing{every: 1, budget: defaultRingBudget}
+	return &frameRing{every: 1, budget: defaultRingBudget, stage: StageOffscreen}
+}
+
+// Stage is which stage the ring keeps.
+//
+// The offscreen, unless asked otherwise, and that default is about cost rather
+// than fidelity: this is the one thing here that captures continuously, and on a
+// game with a final pass the difference is the logical resolution against the
+// window's — thirteen times the bytes off the GPU and through the encoder, for
+// every frame, for as long as it is on. A screenshot pays that once; a buffer
+// running for ten minutes pays it thirty-six thousand times.
+func (r *frameRing) Stage() Stage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.stage
 }
 
 // Enable starts keeping frames, replacing whatever was kept before.
-func (r *frameRing) Enable(budget, every int) {
+func (r *frameRing) Enable(budget, every int, stage Stage) {
 	r.Disable()
 
 	if budget <= 0 {
@@ -84,9 +100,12 @@ func (r *frameRing) Enable(budget, every int) {
 	if every <= 0 {
 		every = 1
 	}
+	if stage != StageFinal {
+		stage = StageOffscreen
+	}
 
 	r.mu.Lock()
-	r.enabled, r.budget, r.every = true, budget, every
+	r.enabled, r.budget, r.every, r.stage = true, budget, every, stage
 	r.frames, r.bytes = nil, 0
 	r.seen, r.dropped, r.encoded = 0, 0, 0
 	r.queue = make(chan pendingFrame, ringQueueDepth)
@@ -221,6 +240,7 @@ func (r *frameRing) Status() map[string]any {
 		"memory_mb": round2(float64(r.bytes) / (1 << 20)),
 		"budget_mb": round2(float64(r.budget) / (1 << 20)),
 		"every":     r.every,
+		"stage":     string(r.stage),
 		"encoded":   r.encoded,
 		"dropped":   r.dropped,
 	}

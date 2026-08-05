@@ -29,7 +29,12 @@ import (
 
 const (
 	defaultAddr = "127.0.0.1:8384"
-	defaultURL  = "http://" + defaultAddr + "/mcp"
+
+	// modulePath is spelled out rather than taken from build info, which reports
+	// an empty path for a binary built with `go build` from the module itself —
+	// exactly how this is run while being worked on.
+	modulePath = "github.com/bstkhq/go-ebiten-mcp"
+	defaultURL = "http://" + defaultAddr + "/mcp"
 )
 
 func main() {

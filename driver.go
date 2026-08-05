@@ -275,10 +275,24 @@ func (d *Driver) Scroll(x, y float64) {
 func (d *Driver) Screenshot() *image.RGBA {
 	d.t.Helper()
 
+	return d.ScreenshotStage(StageOffscreen)
+}
+
+// ScreenshotStage captures a particular stage.
+//
+// Screenshot reads the offscreen rather than what the player sees, and for a
+// test that is the right way round: the final screen is the size of the window,
+// so an assertion about it — a golden above all — would depend on the monitor
+// the test happened to run on. Ask for StageFinal when the game's own
+// DrawFinalScreen is the thing under test, and expect to size the window
+// yourself.
+func (d *Driver) ScreenshotStage(stage Stage) *image.RGBA {
+	d.t.Helper()
+
 	ctx, cancel := d.ctx()
 	defer cancel()
 
-	frame, err := d.rt.Capture(ctx)
+	frame, err := d.rt.CaptureStage(ctx, stage)
 	if err != nil {
 		d.fatal(err)
 	}

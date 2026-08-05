@@ -20,8 +20,9 @@ func (s *Server) addFrameTools(srv *mcpsdk.Server) {
 }
 
 type ringEnableInput struct {
-	BudgetMB int `json:"budget_mb,omitempty" jsonschema:"how much memory the buffer may use; defaults to 64"`
-	Every    int `json:"every,omitempty" jsonschema:"keep one frame out of every N drawn. Raise it to cover more time for the same memory, or when frames are being dropped"`
+	BudgetMB int    `json:"budget_mb,omitempty" jsonschema:"how much memory the buffer may use; defaults to 64"`
+	Every    int    `json:"every,omitempty" jsonschema:"keep one frame out of every N drawn. Raise it to cover more time for the same memory, or when frames are being dropped"`
+	Stage    string `json:"stage,omitempty" jsonschema:"which drawing step to keep. Defaults to offscreen, unlike the other capture tools: this one runs continuously, and on a game with its own DrawFinalScreen the final screen is the size of the window rather than the logical resolution, which is many times the bytes off the GPU and through the encoder for every frame. Ask for final when the pass itself is what you are debugging"`
 }
 
 type framesInput struct {
@@ -36,7 +37,15 @@ func (s *Server) frames(_ context.Context, _ *mcpsdk.CallToolRequest, in framesI
 
 	switch {
 	case in.Enable != nil:
-		ring.Enable(in.Enable.BudgetMB<<20, in.Enable.Every)
+		stage := Stage(in.Enable.Stage)
+		if stage == "" {
+			stage = StageOffscreen
+		}
+		if stage != StageOffscreen && stage != StageFinal {
+			return nil, nil, fmt.Errorf("unknown stage %q: %s", in.Enable.Stage, stageDoc)
+		}
+
+		ring.Enable(in.Enable.BudgetMB<<20, in.Enable.Every, stage)
 		return nil, map[string]any{
 			"ring": ring.Status(),
 			"note": "keeping frames now; ask again without enable to get them",
@@ -71,7 +80,7 @@ func (s *Server) frames(_ context.Context, _ *mcpsdk.CallToolRequest, in framesI
 		if err != nil {
 			continue
 		}
-		frames = append(frames, &Frame{Tick: k.Tick, Time: k.Time, Image: img})
+		frames = append(frames, &Frame{Tick: k.Tick, Time: k.Time, Stage: ring.Stage(), Image: img})
 	}
 
 	if len(frames) == 0 {

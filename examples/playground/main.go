@@ -12,6 +12,9 @@
 //	5 Form    typed runes, which reach the game by a different path than keys
 //	6 Stress  a framerate you can sink, a panic button and a blocking update
 //
+// F toggles a CRT pass drawn in DrawFinalScreen, which is the one thing that
+// exists in what the player sees and not in what the game's own Draw produced.
+//
 // It draws everything from code, so there are no assets and no dependencies
 // beyond Ebitengine itself.
 //

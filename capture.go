@@ -8,24 +8,56 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// Frame is one captured screen, at the game's own resolution and untouched.
+// Stage is which of Ebitengine's two drawing steps a frame was read from.
+//
+// Ebitengine draws twice. First the game's Draw fills an offscreen at the
+// logical resolution. Then, if the game implements ebiten.FinalScreenDrawer, its
+// DrawFinalScreen composites that offscreen onto the real screen — and a CRT
+// shader, scanlines, a letterbox or a custom scaling filter all live in that
+// second step. Reading the offscreen would show the image before any of it,
+// which is not what the player is looking at.
+type Stage string
+
+const (
+	// StageOffscreen is the image the game's own Draw produced, at the logical
+	// resolution.
+	StageOffscreen Stage = "offscreen"
+
+	// StageFinal is what the player sees, after the game's own final pass, at
+	// the resolution of the window.
+	StageFinal Stage = "final"
+)
+
+// Frame is one captured screen, untouched.
 type Frame struct {
 	Tick  int64       `json:"tick"`
 	Time  time.Time   `json:"time"`
+	Stage Stage       `json:"stage"`
 	Image *image.RGBA `json:"-"`
 }
 
-// Capture asks for the next frame the game draws.
+// Capture asks for the next frame the game draws, at whichever stage this
+// runtime is configured for.
 //
 // Reading pixels back is a synchronisation point with the GPU, so it only
 // happens when somebody is waiting for one. Capturing every frame
 // unconditionally would cost the game a large part of its frame budget for
 // images nobody looks at.
 func (r *Runtime) Capture(ctx context.Context) (*Frame, error) {
+	return r.CaptureStage(ctx, r.DefaultStage())
+}
+
+// CaptureStage asks for the next frame at a particular stage.
+//
+// Asking for the offscreen of a game that has a final pass is how you tell
+// whether a visual bug is in the game or in the pass — and it is what tests
+// should use, since the final screen is the size of the window and a golden that
+// changes with the monitor is no golden at all.
+func (r *Runtime) CaptureStage(ctx context.Context, stage Stage) (*Frame, error) {
 	ch := make(chan *Frame, 1)
 
 	r.mu.Lock()
-	r.captures = append(r.captures, ch)
+	r.captures = append(r.captures, captureRequest{ch: ch, stage: stage})
 	r.mu.Unlock()
 
 	select {
@@ -37,12 +69,29 @@ func (r *Runtime) Capture(ctx context.Context) (*Frame, error) {
 	}
 }
 
+// HasFinalPass reports whether the game draws its own final screen, which is
+// what makes the two stages different images.
+func (r *Runtime) HasFinalPass() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.hasFinal
+}
+
+// DefaultStage is the stage Capture uses when nobody asks for one.
+func (r *Runtime) DefaultStage() Stage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.defaultStage
+}
+
 func (r *Runtime) cancelCapture(ch chan *Frame) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	for i, c := range r.captures {
-		if c == ch {
+		if c.ch == ch {
 			r.captures = append(r.captures[:i], r.captures[i+1:]...)
 			return
 		}
@@ -59,13 +108,47 @@ func (r *Runtime) LastFrame() *Frame {
 	return r.lastFrame
 }
 
-// serveCaptures hands the frame just drawn to everyone waiting for one. Called
-// at the end of Draw, when the screen holds exactly what the player sees.
-func (r *Runtime) serveCaptures(screen *ebiten.Image) {
+// captureRequest is one waiter and the stage it asked for.
+type captureRequest struct {
+	ch    chan *Frame
+	stage Stage
+}
+
+// capturePlan is what this frame owes, decided once before anything is drawn.
+//
+// It has to be decided up front because reading the final screen is not
+// possible: ebiten.FinalScreen has no ReadPixels. The only way to see it is to
+// hand the game an image we own instead, and that swap must happen before the
+// game draws into it.
+type capturePlan struct {
+	offscreen []chan *Frame
+	final     []chan *Frame
+	ring      Stage // "" when the ring does not want this frame
+}
+
+func (p capturePlan) wantsFinal() bool {
+	return len(p.final) > 0 || p.ring == StageFinal
+}
+
+func (p capturePlan) wantsOffscreen() bool {
+	return len(p.offscreen) > 0 || p.ring == StageOffscreen
+}
+
+func (p capturePlan) idle() bool {
+	return !p.wantsFinal() && !p.wantsOffscreen()
+}
+
+// beginCapture decides what this frame owes, and takes the waiters off the
+// queue so the next frame does not serve them twice.
+//
+// It is also the single place the ring's frame counter advances, which is why
+// it must be called exactly once per drawn frame.
+func (r *Runtime) beginCapture() capturePlan {
 	r.mu.Lock()
 	waiting := r.captures
 	r.captures = nil
 	ring := r.ring
+	hasFinal := r.hasFinal
 	// A crashed game keeps drawing — the wrapper paints the last frame and the
 	// panic over it — and a paused one redraws the same thing forever. Feeding
 	// either to the buffer fills it with identical frames that evict exactly the
@@ -73,21 +156,76 @@ func (r *Runtime) serveCaptures(screen *ebiten.Image) {
 	frozen := r.crash != nil || (r.paused && r.steps == 0)
 	r.mu.Unlock()
 
-	keepForRing := ring != nil && !frozen && ring.wants()
-	if len(waiting) == 0 && !keepForRing {
+	var plan capturePlan
+
+	for _, req := range waiting {
+		// With no final pass of its own the game's offscreen is what the player
+		// sees, give or take Ebitengine's scaling, so both stages are the same
+		// image and there is nothing to read twice.
+		if req.stage == StageFinal && hasFinal {
+			plan.final = append(plan.final, req.ch)
+			continue
+		}
+		plan.offscreen = append(plan.offscreen, req.ch)
+	}
+
+	if ring != nil && !frozen && ring.wants() {
+		plan.ring = ring.Stage()
+		if plan.ring == StageFinal && !hasFinal {
+			plan.ring = StageOffscreen
+		}
+	}
+
+	return plan
+}
+
+// finishCapture reads back whichever stages this frame owed and hands the
+// frames out.
+//
+// Each stage is read at most once however many people asked for it: ReadPixels
+// is a synchronisation point with the GPU, and paying for it twice for the same
+// pixels is exactly the sort of overhead a debugging tool should not add.
+func (r *Runtime) finishCapture(plan capturePlan, offscreen, final *ebiten.Image) {
+	var offFrame, finalFrame *Frame
+
+	if plan.wantsOffscreen() {
+		offFrame = readFrame(offscreen, r.Tick(), StageOffscreen)
+		for _, ch := range plan.offscreen {
+			ch <- offFrame
+		}
+	}
+
+	if plan.wantsFinal() && final != nil {
+		finalFrame = readFrame(final, r.Tick(), StageFinal)
+		for _, ch := range plan.final {
+			ch <- finalFrame
+		}
+	}
+
+	// The offscreen is preferred for lastFrame because that is what redraws the
+	// screen after a crash, and it is the only one whose size matches it.
+	last := offFrame
+	if last == nil {
+		last = finalFrame
+	}
+
+	r.mu.Lock()
+	if last != nil {
+		r.lastFrame = last
+	}
+	r.mu.Unlock()
+
+	if plan.ring == "" {
 		return
 	}
-
-	// One read for both. ReadPixels is a synchronisation point with the GPU, so
-	// doing it twice on a frame somebody asked for while the ring is running
-	// would cost the game twice for the same pixels.
-	frame := r.readFrame(screen)
-
-	for _, ch := range waiting {
-		ch <- frame
-	}
-	if keepForRing {
-		ring.offer(frame.Image, frame.Tick)
+	if ring := r.Ring(); ring != nil {
+		frame := offFrame
+		if plan.ring == StageFinal {
+			frame = finalFrame
+		}
+		if frame != nil {
+			ring.offer(frame.Image, frame.Tick)
+		}
 	}
 }
 
@@ -104,27 +242,26 @@ func (r *Runtime) Ring() *frameRing {
 }
 
 // keepFrame captures the screen without anyone having asked, which is only
-// worth its cost when the game has just crashed and this is the last image
-// that will ever exist of it.
+// worth its cost when the game has just crashed and this is the last image that
+// will ever exist of it.
 func (r *Runtime) keepFrame(screen *ebiten.Image) {
-	r.readFrame(screen)
+	frame := readFrame(screen, r.Tick(), StageOffscreen)
+
+	r.mu.Lock()
+	r.lastFrame = frame
+	r.mu.Unlock()
 }
 
-func (r *Runtime) readFrame(screen *ebiten.Image) *Frame {
+func readFrame(screen *ebiten.Image, tick int64, stage Stage) *Frame {
 	bounds := screen.Bounds()
 
 	img := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
 	screen.ReadPixels(img.Pix)
 
-	frame := &Frame{
-		Tick:  r.Tick(),
+	return &Frame{
+		Tick:  tick,
 		Time:  time.Now(),
+		Stage: stage,
 		Image: img,
 	}
-
-	r.mu.Lock()
-	r.lastFrame = frame
-	r.mu.Unlock()
-
-	return frame
 }

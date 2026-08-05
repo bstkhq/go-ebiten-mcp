@@ -2,6 +2,7 @@ package ebitenmcp
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"time"
 
@@ -23,6 +24,19 @@ type wrapper struct {
 	lastStart  time.Time
 	drawTime   time.Duration
 	crashImage *ebiten.Image
+
+	// hasFinal is whether this wrapper implements FinalScreenDrawer, in which
+	// case Ebitengine calls DrawFinalScreen after Draw and that is where the
+	// player's image ends up. It describes the wrapper, not the game inside it:
+	// SetGame can swap in a game that draws no final screen, and Ebitengine will
+	// still call ours because the assertion is on the wrapper.
+	hasFinal bool
+
+	// final is the image the game's final pass is redirected into when somebody
+	// wants to see it. It is screen-sized, so it is only allocated while it is
+	// being used and released again once it is not.
+	final     *ebiten.Image
+	finalIdle int
 }
 
 func (w *wrapper) Update() error {
@@ -86,7 +100,13 @@ func (w *wrapper) Draw(screen *ebiten.Image) {
 
 	w.drawTime = time.Since(start)
 	w.rt.recordDraw(w.drawTime)
-	w.rt.serveCaptures(screen)
+
+	// With a final pass still to come, this screen is the offscreen and not what
+	// the player ends up looking at, so serving captures is left to
+	// DrawFinalScreen, which has both images in hand.
+	if !w.hasFinal {
+		w.rt.finishCapture(w.rt.beginCapture(), screen, nil)
+	}
 }
 
 func (w *wrapper) drawGame(screen *ebiten.Image) {
@@ -113,7 +133,10 @@ func (w *wrapper) drawGame(screen *ebiten.Image) {
 // for all of them would be silly.
 func (w *wrapper) drawCrash(screen *ebiten.Image, crash *Crash) {
 	if w.crashImage == nil {
-		if last := w.rt.LastFrame(); last != nil {
+		// Only the offscreen matches this screen. A frame read from the final
+		// pass is the size of the window, and painting it here would put a
+		// magnified corner of the last frame behind the message.
+		if last := w.rt.LastFrame(); last != nil && last.Image.Bounds() == screen.Bounds() {
 			w.crashImage = ebiten.NewImageFromImage(last.Image)
 		}
 	}
@@ -162,26 +185,105 @@ func (w *wrapperLayoutF) LayoutF(outsideWidth, outsideHeight float64) (float64, 
 type wrapperFinalScreen struct{ *wrapper }
 
 func (w *wrapperFinalScreen) DrawFinalScreen(screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
-	drawFinalScreen(w.rt, screen, offscreen, geoM)
+	w.drawFinalScreen(screen, offscreen, geoM)
 }
 
 type wrapperLayoutFFinalScreen struct{ *wrapperLayoutF }
 
 func (w *wrapperLayoutFFinalScreen) DrawFinalScreen(screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
-	drawFinalScreen(w.rt, screen, offscreen, geoM)
+	w.drawFinalScreen(screen, offscreen, geoM)
 }
 
-// drawFinalScreen forwards to the game, or reproduces Ebitengine's own default
-// when the current game does not want to draw the final screen itself.
-func drawFinalScreen(rt *Runtime, screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
-	if g, ok := rt.currentGame().(ebiten.FinalScreenDrawer); ok {
+// drawFinalScreen runs the game's final pass and, when somebody is waiting for
+// a frame, keeps a copy of what it produced.
+//
+// The copy is the only way to see it. ebiten.FinalScreen has no ReadPixels, so
+// the screen the player is looking at cannot be read back at all; handing the
+// game an image of our own instead — which works because *ebiten.Image satisfies
+// FinalScreen — and blitting it onward is what makes the pass visible.
+//
+// Nobody waiting means none of that happens: the game gets the real screen and
+// this costs one branch. A game whose final pass is a full-screen shader should
+// not pay for a debugging tool that is not being used.
+func (w *wrapper) drawFinalScreen(screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
+	start := time.Now()
+	plan := w.rt.beginCapture()
+
+	if !plan.wantsFinal() {
+		w.finalPass(screen, offscreen, geoM)
+		w.rt.finishCapture(plan, offscreen, nil)
+		w.releaseFinal()
+		w.rt.addDraw(time.Since(start))
+		return
+	}
+
+	target := w.finalImage(screen.Bounds())
+	w.finalPass(target, offscreen, geoM)
+	screen.DrawImage(target, nil)
+
+	w.rt.finishCapture(plan, offscreen, target)
+	w.rt.addDraw(time.Since(start))
+}
+
+// finalPass forwards to the game, or falls back to Ebitengine's own.
+//
+// The fallback is Ebitengine's exported implementation rather than something
+// equivalent-looking: the real one picks its filter from whether the scale is a
+// whole number, and a hand-rolled linear blit would quietly change how the game
+// looks the moment SetGame swapped in a game without a pass of its own.
+func (w *wrapper) finalPass(screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
+	defer func() {
+		if v := recover(); v != nil {
+			w.rt.recordCrash("final", v)
+		}
+	}()
+
+	// A game that has already died does not get called again here either. Its
+	// final pass is as likely to panic as the Draw that just did, and
+	// Ebitengine's own is what keeps the crash banner on the screen.
+	if g, ok := w.rt.currentGame().(ebiten.FinalScreenDrawer); ok && w.rt.Crash() == nil {
 		g.DrawFinalScreen(screen, offscreen, geoM)
 		return
 	}
 
-	op := &ebiten.DrawImageOptions{Filter: ebiten.FilterLinear}
-	op.GeoM = geoM
-	screen.DrawImage(offscreen, op)
+	ebiten.DefaultDrawFinalScreen(screen, offscreen, geoM)
+}
+
+// finalIdleFrames is how long the screen-sized copy sticks around unused before
+// being handed back. Roughly five seconds at sixty frames a second: long enough
+// that a burst of screenshots reuses it, short enough that a game which was
+// looked at once an hour ago is not still holding it. At 4K it is 33 MB.
+const finalIdleFrames = 300
+
+func (w *wrapper) finalImage(bounds image.Rectangle) *ebiten.Image {
+	w.finalIdle = 0
+
+	if w.final != nil && w.final.Bounds() != bounds {
+		w.final.Deallocate()
+		w.final = nil
+	}
+	if w.final == nil {
+		w.final = ebiten.NewImageWithOptions(bounds, &ebiten.NewImageOptions{Unmanaged: true})
+	}
+
+	// The game's pass need not cover every pixel — a letterbox leaves bars — and
+	// what shows through there has to be this frame's, not the last one's.
+	w.final.Clear()
+	return w.final
+}
+
+func (w *wrapper) releaseFinal() {
+	if w.final == nil {
+		return
+	}
+
+	w.finalIdle++
+	if w.finalIdle < finalIdleFrames {
+		return
+	}
+
+	w.final.Deallocate()
+	w.final, w.finalIdle = nil, 0
 }
 
 // wrap builds the wrapper type matching the optional interfaces the game
@@ -191,6 +293,12 @@ func wrap(rt *Runtime) ebiten.Game {
 
 	_, layoutF := rt.currentGame().(ebiten.LayoutFer)
 	_, finalScreen := rt.currentGame().(ebiten.FinalScreenDrawer)
+
+	base.hasFinal = finalScreen
+
+	rt.mu.Lock()
+	rt.hasFinal = finalScreen
+	rt.mu.Unlock()
 
 	switch {
 	case layoutF && finalScreen:
