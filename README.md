@@ -155,6 +155,4 @@ what comes back is a picture.
 
 ## Licence
 
-MIT. Ebitengine is Apache-2.0 and stays that way: it is a dependency rather than
-something this repository ships, so it carries its own terms wherever you get it
-from.
+[MIT](LICENSE).
