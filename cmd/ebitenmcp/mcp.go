@@ -13,24 +13,26 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// `ebitenmcp mcp` is the control server: it starts displays and games, and
-// nothing else.
+// `ebitenmcp mcp` is the control server: it starts the display and the game, and
+// forwards the game's own tools once there is a game to forward them to.
 //
-// The tools that look at a game and drive it live in the game, served from its
-// own endpoint, and this command does not proxy them. That split is deliberate.
-// The normal way to debug is to attach to a game that is already running — on a
-// kiosk, with a real screen — where the game's server is already there and its
-// tools are already listed. Nothing needs starting, so nothing should be in the
-// way.
-//
-// This server is for the other case: no display, no game, usually a test. Two
-// entries in the client's configuration, each doing one job:
+// The tools that look at a game and drive it belong to the game and are served
+// from its own endpoint, which is where a client that can reach it should go —
+// one hop instead of two, and no images copied through anything. So the normal
+// setup is still two entries, and the normal way to debug is still to attach to
+// a game that is already running on a machine that already has a screen:
 //
 //	{"mcpServers": {
 //	  "game":         {"type": "http", "url": "http://127.0.0.1:8384/mcp"},
-//	  "game-control": {"command": "ebitenmcp",
-//	                   "args": ["mcp", "--start", "go run ./cmd/mygame"]}
+//	  "game-control": {"command": "go",
+//	                   "args": ["run", "github.com/bstkhq/go-ebiten-mcp/cmd/ebitenmcp@latest",
+//	                            "mcp", "--start", "go run ./cmd/mygame"]}
 //	}}
+//
+// The forwarding (proxy.go) is for the clients that cannot do that. Plenty only
+// know how to launch a command and talk over a pipe, and for those the game's
+// endpoint cannot be configured at all — without it they could start a game and
+// then do nothing with it. One entry, both jobs, at the cost of a hop.
 
 type controlOptions struct {
 	url    string
@@ -110,6 +112,16 @@ type control struct {
 	opts  controlOptions
 	proxy *proxy
 
+	// starting serialises game_start end to end, including the wait.
+	//
+	// Without it two concurrent calls both find nothing answering and both
+	// launch: c.game keeps whichever finished last and the other is orphaned —
+	// still running, holding a window, and impossible to stop, because
+	// game_stop only knows about c.game. It does not even collide loudly, since
+	// the game falls back to a free port when its own is taken. A client that
+	// retries is enough to cause it.
+	starting sync.Mutex
+
 	mu      sync.Mutex
 	game    *exec.Cmd
 	out     *tailWriter
@@ -163,6 +175,11 @@ func (c *control) addTools(server *mcpsdk.Server) {
 type emptyInput struct{}
 
 func (c *control) start(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, any, error) {
+	c.starting.Lock()
+	defer c.starting.Unlock()
+
+	// Checked after the wait, not before it: a second caller that queued behind
+	// a start now finds the game up and says so, rather than launching another.
 	if alive(ctx, c.opts.url) {
 		c.refreshProxy(ctx)
 		return nil, map[string]any{

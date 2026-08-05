@@ -1,18 +1,24 @@
-// Command ebitenmcp drives a running game's MCP server from a shell.
+// Command ebitenmcp is everything around a game that the game cannot do for
+// itself: give it a display, start it, wire it into an agent, and talk to it
+// from a shell.
 //
-// It exists for the two situations an MCP client cannot cover: a person poking
-// at a game from a terminal, and a script or CI job that wants a screenshot
-// without speaking the protocol.
-//
+//	ebitenmcp init             write .mcp.json and a note in CLAUDE.md
+//	ebitenmcp mcp --start ...  the stdio server an MCP client launches
+//	ebitenmcp x start [--gpu]  an X server in a container, for a machine with none
 //	ebitenmcp run ./mygame     start a display if needed, run the game with MCP on
+//	ebitenmcp find             the games running on this machine
+//
+// And, for a person at a terminal or a CI job that wants a screenshot without
+// speaking the protocol, a small client for the game's own server:
+//
 //	ebitenmcp tools
 //	ebitenmcp state
 //	ebitenmcp call game_key '{"keys":["arrowdown"],"then_screenshot":true}'
 //	ebitenmcp shot /tmp/frame.png
-//	ebitenmcp find
 //
 // Images that come back are written into the output directory and their paths
-// printed, so a terminal never gets a screenful of base64.
+// printed, so a terminal never gets a screenful of base64. `--out` chooses the
+// directory; it defaults to the working one.
 package main
 
 import (
@@ -97,17 +103,20 @@ func run(args []string) error {
 	}
 	out := "."
 
+	// The global flags, which come before the subcommand. A loop with a goto out
+	// of its own switch is one way to write this; a loop that stops when it stops
+	// recognising things is the same thing without the label.
 	for len(args) >= 2 {
 		switch args[0] {
 		case "-url", "--url":
 			url, args = args[1], args[2:]
+			continue
 		case "-out", "--out":
 			out, args = args[1], args[2:]
-		default:
-			goto parsed
+			continue
 		}
+		break
 	}
-parsed:
 
 	if len(args) == 0 {
 		return usage()

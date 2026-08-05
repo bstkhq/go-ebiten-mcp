@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,59 @@ import (
 	"syscall"
 	"time"
 )
+
+// parseRunFlags reads the flags and returns what is left, which is the command
+// to run.
+//
+// Separate from runCommand because it was a loop containing two switches over
+// the same variable and a goto out of one of them, in front of a function that
+// then did four other jobs. The flags stop where `--` is, or at the first
+// argument that is not a flag.
+func parseRunFlags(args []string) (runOptions, []string, error) {
+	opts := runOptions{screen: "1280x720", addr: defaultAddr, mode: "auto"}
+
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		flag := args[0]
+		args = args[1:]
+
+		if flag == "--" {
+			return opts, args, nil
+		}
+
+		switch flag {
+		case "--gpu":
+			opts.gpu = true
+			continue
+		case "--keep-display":
+			opts.keep = true
+			continue
+		}
+
+		if len(args) == 0 {
+			return opts, nil, fmt.Errorf("%s needs a value", flag)
+		}
+		value := args[0]
+		args = args[1:]
+
+		switch flag {
+		case "--screen":
+			opts.screen = value
+		case "--display":
+			opts.display = value
+		case "--addr":
+			opts.addr = value
+		case "--x":
+			if value != "local" && value != "container" && value != "auto" {
+				return opts, nil, fmt.Errorf("--x takes local, container or auto, not %q", value)
+			}
+			opts.mode = value
+		default:
+			return opts, nil, fmt.Errorf("unknown flag %q", flag)
+		}
+	}
+
+	return opts, args, nil
+}
 
 // `ebitenmcp run` starts a display and runs a command against it.
 //
@@ -43,46 +97,10 @@ type runOptions struct {
 }
 
 func runCommand(args []string) error {
-	opts := runOptions{screen: "1280x720", addr: defaultAddr, mode: "auto"}
-
-	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
-		flag := args[0]
-		args = args[1:]
-
-		switch flag {
-		case "--":
-			goto parsed
-		case "--gpu":
-			opts.gpu = true
-			continue
-		case "--keep-display":
-			opts.keep = true
-			continue
-		}
-
-		if len(args) == 0 {
-			return fmt.Errorf("%s needs a value", flag)
-		}
-		value := args[0]
-		args = args[1:]
-
-		switch flag {
-		case "--screen":
-			opts.screen = value
-		case "--display":
-			opts.display = value
-		case "--addr":
-			opts.addr = value
-		case "--x":
-			if value != "local" && value != "container" && value != "auto" {
-				return fmt.Errorf("--x takes local, container or auto, not %q", value)
-			}
-			opts.mode = value
-		default:
-			return fmt.Errorf("unknown flag %q", flag)
-		}
+	opts, args, err := parseRunFlags(args)
+	if err != nil {
+		return err
 	}
-parsed:
 
 	if len(args) == 0 {
 		return fmt.Errorf("run needs a command, for example: ebitenmcp run ./mygame")
@@ -155,13 +173,22 @@ const (
 // still passes every test it is given, while every timing it produces is a lie.
 // "llvmpipe" where "radeonsi" was expected is the single most useful line in
 // the output.
+// rendererTimeout bounds glxinfo, which x_start and x_status both reach. A dead
+// display can leave it waiting on a connection that will never be answered, and
+// a tool that hangs on a display probe is worse than one that says it could not
+// tell.
+const rendererTimeout = 10 * time.Second
+
 func renderer(display string) string {
 	path, err := exec.LookPath("glxinfo")
 	if err != nil {
 		return "unknown (install mesa-utils to find out)"
 	}
 
-	cmd := exec.Command(path, "-B")
+	ctx, cancel := context.WithTimeout(context.Background(), rendererTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path, "-B")
 	cmd.Env = append(os.Environ(), "DISPLAY="+display)
 
 	out, err := cmd.Output()

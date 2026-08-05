@@ -37,12 +37,16 @@ func newTail(max int, through io.Writer) *tailWriter {
 }
 
 func (t *tailWriter) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
+	// Outside the lock: this is a write to a terminal, and holding a mutex
+	// across it would make every reader of the buffer wait on somebody's slow
+	// pipe. The writer is a single stream in practice — both descriptors are
+	// folded onto one of these — so the ordering that matters is preserved.
 	if t.through != nil {
 		t.through.Write(p)
 	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
 	t.partial = append(t.partial, p...)
 	for {

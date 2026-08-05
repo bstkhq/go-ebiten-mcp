@@ -40,6 +40,11 @@ type proxy struct {
 	mu         sync.Mutex
 	session    *mcpsdk.ClientSession
 	registered map[string]bool
+
+	// dialing serialises opening the session; mu guards the fields. Two locks
+	// because the dial is slow and the fields are read from every forwarded
+	// call.
+	dialing sync.Mutex
 }
 
 func newProxy(c *control, server *mcpsdk.Server) *proxy {
@@ -161,7 +166,17 @@ func (p *proxy) forward(ctx context.Context, name string, req *mcpsdk.CallToolRe
 	return session.CallTool(ctx, &mcpsdk.CallToolParams{Name: name, Arguments: arguments})
 }
 
+// connect returns the session to the game, opening one if there is none.
+//
+// The lock is held across the dial rather than dropped for it. Checking, then
+// connecting, then storing lets two callers each build a session and one
+// overwrite the other — leaking a live HTTP connection and its goroutines — and
+// an agent calling two forwarded tools at once is the normal case, not a rare
+// one. Serialising the first connection is cheap; leaking one is not.
 func (p *proxy) connect(ctx context.Context) (*mcpsdk.ClientSession, error) {
+	p.dialing.Lock()
+	defer p.dialing.Unlock()
+
 	p.mu.Lock()
 	session := p.session
 	p.mu.Unlock()

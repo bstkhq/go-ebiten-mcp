@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -32,6 +33,52 @@ import (
 
 //go:embed xserver.Containerfile
 var xserverContainerfile []byte
+
+// engineTimeout bounds every call to the container engine.
+//
+// Not one of them had a deadline, including the `logs` inside waitForXwayland's
+// own sixty-second loop — which meant that loop could not time out either, since
+// the thing it was polling with was what hung. All of it is reachable from
+// x_start.
+const engineTimeout = 30 * time.Second
+
+// engineCommand builds a call to the container engine with a deadline, and the
+// cancel that releases it. Every caller defers the cancel; a command that
+// finished must not leave its timer standing until it would have fired.
+func engineCommand(timeout time.Duration, engine string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return exec.CommandContext(ctx, engine, args...), cancel
+}
+
+// engineRun, engineOutput and engineCombined are the three shapes this file
+// uses. They exist so that the deadline and its cleanup are written once rather
+// than at each of a dozen call sites, where forgetting the cancel looks like
+// nothing at all.
+func engineRun(engine string, args ...string) error {
+	cmd, cancel := engineCommand(engineTimeout, engine, args...)
+	defer cancel()
+
+	return cmd.Run()
+}
+
+func engineOutput(engine string, args ...string) ([]byte, error) {
+	cmd, cancel := engineCommand(engineTimeout, engine, args...)
+	defer cancel()
+
+	return cmd.Output()
+}
+
+func engineCombined(engine string, args ...string) ([]byte, error) {
+	cmd, cancel := engineCommand(engineTimeout, engine, args...)
+	defer cancel()
+
+	return cmd.CombinedOutput()
+}
+
+// buildTimeout is its own number because building the image is the one call
+// here that legitimately takes minutes: it happens once, on a machine that has
+// never run this, and it is downloading an X server.
+const buildTimeout = 15 * time.Minute
 
 // x11SocketDir is shared between the container and everything that draws. On
 // Linux it is world-writable and sticky, which is what makes this work without
@@ -150,11 +197,11 @@ func ensureImage(engine string, opts xOptions) (string, error) {
 	}
 
 	tag := imageTag()
-	if exec.Command(engine, "image", "exists", tag).Run() == nil {
+	if engineRun(engine, "image", "exists", tag) == nil {
 		return tag, nil
 	}
 	// docker has no `image exists`; inspect answers the same question.
-	if exec.Command(engine, "image", "inspect", tag).Run() == nil {
+	if engineRun(engine, "image", "inspect", tag) == nil {
 		return tag, nil
 	}
 
@@ -171,7 +218,9 @@ func ensureImage(engine string, opts xOptions) (string, error) {
 
 	fmt.Fprintf(os.Stderr, "ebitenmcp: building the X server image %s, once\n", tag)
 
-	build := exec.Command(engine, "build", "-t", tag, "-f", path, dir)
+	build, cancel := engineCommand(buildTimeout, engine, "build", "-t", tag, "-f", path, dir)
+	defer cancel()
+
 	build.Stdout, build.Stderr = os.Stderr, os.Stderr
 
 	if err := build.Run(); err != nil {
@@ -211,7 +260,7 @@ func startXContainer(opts xOptions) (display string, started bool, err error) {
 	}
 
 	// A container left behind by an earlier run whose display is gone.
-	exec.Command(engine, "rm", "-f", opts.name).Run()
+	engineRun(engine, "rm", "-f", opts.name)
 
 	image, err := ensureImage(engine, opts)
 	if err != nil {
@@ -232,15 +281,15 @@ func startXContainer(opts xOptions) (display string, started bool, err error) {
 	}
 	run = append(run, image, "sh", "-c", westonCommand(opts, width, height))
 
-	out, err := exec.Command(engine, run...).CombinedOutput()
+	out, err := engineCombined(engine, run...)
 	if err != nil {
 		return "", false, fmt.Errorf("starting the X server: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	display, err = waitForXwayland(engine, opts.name)
 	if err != nil {
-		logs, _ := exec.Command(engine, "logs", opts.name).CombinedOutput()
-		exec.Command(engine, "rm", "-f", opts.name).Run()
+		logs, _ := engineCombined(engine, "logs", opts.name)
+		engineRun(engine, "rm", "-f", opts.name)
 		return "", false, fmt.Errorf("%w\n%s", err, tail(string(logs), 15))
 	}
 	return display, true, nil
@@ -276,7 +325,7 @@ func waitForXwayland(engine, name string) (string, error) {
 	deadline := time.Now().Add(60 * time.Second)
 
 	for time.Now().Before(deadline) {
-		logs, err := exec.Command(engine, "logs", name).CombinedOutput()
+		logs, err := engineCombined(engine, "logs", name)
 		if err == nil {
 			if m := xwaylandDisplay.FindStringSubmatch(string(logs)); m != nil {
 				if err := waitForDisplay(m[1]); err != nil {
@@ -296,12 +345,12 @@ func waitForXwayland(engine, name string) (string, error) {
 // runningDisplay reports the display of an already-running container, if its
 // socket is still there.
 func runningDisplay(engine string, opts xOptions) (string, bool) {
-	state, err := exec.Command(engine, "inspect", "-f", "{{.State.Running}}", opts.name).Output()
+	state, err := engineOutput(engine, "inspect", "-f", "{{.State.Running}}", opts.name)
 	if err != nil || strings.TrimSpace(string(state)) != "true" {
 		return "", false
 	}
 
-	logs, err := exec.Command(engine, "logs", opts.name).CombinedOutput()
+	logs, err := engineCombined(engine, "logs", opts.name)
 	if err != nil {
 		return "", false
 	}
@@ -325,8 +374,8 @@ func runningDisplay(engine string, opts xOptions) (string, bool) {
 // which docker does not have at all. Looking for the file is the same question
 // asked of something that has to answer it honestly.
 func hasGPU(engine, name string) bool {
-	return exec.Command(engine, "exec", name,
-		"sh", "-c", "test -e "+renderNode).Run() == nil
+	return engineRun(engine, "exec", name,
+		"sh", "-c", "test -e "+renderNode) == nil
 }
 
 func stopXContainer(opts xOptions) error {
@@ -340,7 +389,7 @@ func stopXContainer(opts xOptions) error {
 	// creep upwards forever as stale files accumulated.
 	display, running := runningDisplay(engine, opts)
 
-	out, err := exec.Command(engine, "rm", "-f", opts.name).CombinedOutput()
+	out, err := engineCombined(engine, "rm", "-f", opts.name)
 	if err != nil {
 		return fmt.Errorf("stopping the X server: %s", strings.TrimSpace(string(out)))
 	}
