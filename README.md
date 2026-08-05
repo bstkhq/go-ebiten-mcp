@@ -146,18 +146,40 @@ matters for a game you have attached to and are not looking at yet.
 **Ask it things.** `game_inspect` walks the game's own state by path,
 *including unexported fields*, because a Go game keeps almost everything
 unexported and an inspector that respected visibility would show empty structs.
+It also fetches named snapshots a game publishes about itself, as `@name` — for
+the questions no path answers, because the answer is computed rather than
+stored:
+
+```go
+ebitenmcp.RunGame(game,
+    ebitenmcp.WithState("summary", func(current ebiten.Game) any {
+        g := current.(*Game)
+        return map[string]any{"screen": g.screenName(), "score": g.score()}
+    }),
+)
+```
+
+The provider is handed whatever game is running, not the one that existed when
+it was written, so it keeps telling the truth after `game_reset`.
 `game_state`, `game_traces` and `game_frametimes` cover the process: framerate,
 memory, what it printed, and what each tick cost split into update and draw.
 `game_profile` goes one further and says *where* the time or the memory went — it
 returns the profile summarised as text, not just a pprof file somebody else would
 have to open.
 
+Every tool answers with a described shape rather than a bare object, so a client
+can check what it got: the MCP `outputSchema` is generated from the type each
+handler returns, and a test refuses a tool that has none.
+
 **And when it breaks.** A panic in the game is caught, recorded with its stack,
 the tick it happened on and the lines it printed in the second before it — no
 second call needed — and the frame from the moment of the crash is kept.
 The game stops; the server keeps answering. `game_state`, `game_traces` and
 `game_goroutines` never touch the game loop, so they still work when it is
-deadlocked — and they say so, rather than hanging along with it.
+deadlocked — and they say so, rather than hanging along with it. A panic in the
+work a tool asked to run inside the loop comes back as an error to whoever asked,
+rather than ending the process: `game_inspect` is read-only and should not be
+able to kill the thing it is reading.
 
 ## Tests
 
@@ -179,6 +201,12 @@ func TestMenuMovesOneRowPerPress(t *testing.T) {
     d.Golden("menu_second_row.png")   // -update records it
 }
 ```
+
+The driver reads state by path with `Inspect`, and with `WithGame` runs a closure
+against the real type — inside the loop, which is the only place it is safe to
+touch a running game. `ScreenshotStage` asks for a particular drawing step;
+`Screenshot` gives the offscreen, because a golden that depended on the size of
+the window would fail on another monitor.
 
 `RunTests` owns the process's single game loop and each test gets a freshly
 built game. That shape is forced: `ebiten.RunGame` cannot be called twice in a
@@ -377,6 +405,20 @@ check](https://github.com/golang/go/issues/67401) says they would like to
 require the handshake form everywhere eventually. The injection sits behind an
 interface so that the day it closes, the implementation changes and the tools do
 not.
+
+## Configuring it
+
+Everything has a default worth keeping, so this is short.
+
+| | |
+|---|---|
+| `EBITEN_MCP_ADDR` | where to listen. Unset means do not serve at all — see [above](#dont-expose-this) |
+| `EBITEN_MCP_CAPTURE` | `offscreen` to skip the screen-sized copy a final pass needs, when that pass is expensive and you are not debugging it |
+| `WithName` | what a client sees when it finds several games running |
+| `WithFactory` | how to build a fresh game, which is what `game_reset` and the test driver start over with |
+| `WithCaptureStage` | the same as `EBITEN_MCP_CAPTURE`, in code |
+| `WithState` | publish a named snapshot, reachable as `@name` |
+| `WithAddr` | the address, ignoring the environment |
 
 ## Compatibility
 
