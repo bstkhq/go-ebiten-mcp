@@ -607,6 +607,101 @@ func TestScriptToolReleasesWhatItPressedWhenItFails(t *testing.T) {
 	}
 }
 
+// TestScriptStepDoesEverythingAMouseCallDoes.
+//
+// A script step used to take seven of game_mouse's twelve fields, so a sequence
+// could move, drag and click and could not scroll, hold a button across steps,
+// or release the cursor — the three things a sequence wants and a single call
+// does not. They are one type now, so this checks the schema rather than the
+// behaviour: the drift is what needs preventing, and it happened in the fields.
+func TestScriptStepDoesEverythingAMouseCallDoes(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	tools := listTools(t, ctx, s)
+
+	mouse := properties(t, tools["game_mouse"])
+	step := properties(t, tools["game_script"])
+
+	// The script's mouse action is nested inside a step, so reach it.
+	steps, _ := step["steps"].(map[string]any)
+	items, _ := steps["items"].(map[string]any)
+	stepProps, _ := items["properties"].(map[string]any)
+	action, _ := stepProps["mouse"].(map[string]any)
+	actionProps, _ := action["properties"].(map[string]any)
+
+	if len(actionProps) == 0 {
+		t.Fatalf("cannot find the script step's mouse action in its schema: %s", mustJSON(t, stepProps))
+	}
+
+	for name := range mouse {
+		// The ones that belong to a call rather than to the mouse.
+		switch name {
+		case "then_wait_ticks", "then_screenshot":
+			continue
+		}
+		if _, ok := actionProps[name]; !ok {
+			t.Errorf("game_mouse takes %q and a script step does not", name)
+		}
+	}
+}
+
+// TestScriptCanHoldAButtonAcrossSteps is the behaviour behind the schema: the
+// point of down and up in a sequence is that the button stays pressed while
+// other steps run, which is a thing a single call cannot express at all.
+func TestScriptCanHoldAButtonAcrossSteps(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := testRT.InputError(); err != nil {
+		t.Skipf("input injection is unavailable here: %v", err)
+	}
+
+	x, y := 10.0, 20.0
+
+	var heldDuring bool
+	if _, _, err := s.script(ctx, nil, scriptInput{Steps: []scriptStep{
+		{At: 0, Mouse: &mouseStep{X: &x, Y: &y, Down: true}},
+		{At: 2, Mouse: &mouseStep{ScrollY: 3}},
+		{At: 4, Mouse: &mouseStep{Up: true}},
+	}}); err != nil {
+		t.Fatalf("game_script holding a button: %v", err)
+	}
+
+	// Read after the fact: what matters is that the sequence ran at all, which
+	// it could not before, and that it let go at the end.
+	if err := testRT.Do(ctx, func() {
+		heldDuring = ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+	}); err != nil {
+		t.Fatalf("reading the button: %v", err)
+	}
+
+	if heldDuring {
+		t.Error("the script finished with the button still held")
+	}
+}
+
+func properties(t *testing.T, tool *mcpsdk.Tool) map[string]any {
+	t.Helper()
+
+	if tool == nil {
+		t.Fatal("no such tool")
+	}
+
+	schema, ok := jsonObject(tool.InputSchema)
+	if !ok {
+		t.Fatalf("the schema does not marshal: %#v", tool.InputSchema)
+	}
+
+	props, _ := schema["properties"].(map[string]any)
+	return props
+}
+
 // TestFrametimesToolSplitsUpdateFromDraw. Knowing a tick is slow is half an
 // answer; knowing which half it went into is the other.
 func TestFrametimesToolSplitsUpdateFromDraw(t *testing.T) {

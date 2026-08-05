@@ -33,22 +33,16 @@ type scriptStep struct {
 	Hold    int          `json:"hold,omitempty" jsonschema:"ticks to hold those keys for; defaults to 1"`
 	Release []string     `json:"release,omitempty" jsonschema:"keys held by an earlier step, to let go of now"`
 	Text    string       `json:"text,omitempty" jsonschema:"text to type"`
-	Mouse   *mouseStep   `json:"mouse,omitempty" jsonschema:"a mouse move, click or drag"`
+	Mouse   *mouseStep   `json:"mouse,omitempty" jsonschema:"a mouse action: move, click, drag, hold, release, or scroll — the same one game_mouse takes"`
 	Touches []touchPoint `json:"touches,omitempty" jsonschema:"touches to hold at this moment; an empty list lifts them"`
 
 	Screenshot bool   `json:"screenshot,omitempty" jsonschema:"capture the frame here and include it in the contact sheet"`
 	Label      string `json:"label,omitempty" jsonschema:"a note for this step, shown on the captured frame"`
 }
 
-type mouseStep struct {
-	X      float64  `json:"x"`
-	Y      float64  `json:"y"`
-	ToX    *float64 `json:"to_x,omitempty" jsonschema:"drag to here"`
-	ToY    *float64 `json:"to_y,omitempty"`
-	Click  bool     `json:"click,omitempty"`
-	Button string   `json:"button,omitempty" jsonschema:"left, right or middle"`
-	Steps  int      `json:"steps,omitempty" jsonschema:"ticks a drag is spread over"`
-}
+// mouseStep is a step's mouse action: the same one game_mouse takes, so a
+// sequence can do everything a call can. See mouseAction.
+type mouseStep = mouseAction
 
 type scriptInput struct {
 	Steps   []scriptStep `json:"steps" jsonschema:"the sequence, in any order; they are run by tick"`
@@ -216,29 +210,12 @@ func (s *Server) runStep(ctx context.Context, step scriptStep, held map[ebiten.K
 }
 
 func (s *Server) runMouseStep(ctx context.Context, m *mouseStep) error {
-	button, err := parseButton(m.Button)
-	if err != nil {
+	if _, err := s.applyMouse(ctx, *m); err != nil {
 		return err
 	}
 
-	inj := s.rt.Injector()
-
-	if m.ToX != nil && m.ToY != nil {
-		return s.drag(ctx, m.X, m.Y, *m.ToX, *m.ToY, button, m.Steps)
-	}
-
-	inj.MoveCursor(m.X, m.Y)
-	if err := s.rt.WaitTicks(ctx, 1); err != nil {
-		return err
-	}
-
-	if !m.Click {
-		return nil
-	}
-
-	if err := s.click(ctx, button); err != nil {
-		return err
-	}
+	// A tick after, so the game sees the move or the press in a frame of its
+	// own rather than folded into whatever the next step does.
 	return s.rt.WaitTicks(ctx, 1)
 }
 

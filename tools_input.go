@@ -232,9 +232,18 @@ func (s *Server) typeText(ctx context.Context, _ *mcpsdk.CallToolRequest, in typ
 // game_mouse
 // ---------------------------------------------------------------------------
 
-type mouseInput struct {
-	afterInput
-
+// mouseAction is everything the mouse can be told to do.
+//
+// Its own type because two things ask for it — game_mouse and a step of
+// game_script — and they had drifted: a script could move, drag and click, and
+// could not scroll, hold a button between steps, or release the cursor. Those
+// three are precisely what a sequence wants and a single call does not, so the
+// tool that needed them most was the one without them.
+//
+// Embedded by both, so the next field is in both by construction. That is the
+// same answer as dragPath and the shared click: the way to stop two things
+// drifting is to make them one thing.
+type mouseAction struct {
 	X       *float64 `json:"x,omitempty" jsonschema:"cursor x in the game's screen pixels"`
 	Y       *float64 `json:"y,omitempty" jsonschema:"cursor y in the game's screen pixels"`
 	ToX     *float64 `json:"to_x,omitempty" jsonschema:"drag to this x, with the button held all the way"`
@@ -249,14 +258,30 @@ type mouseInput struct {
 	Release bool     `json:"release_cursor,omitempty" jsonschema:"stop pinning the cursor and hand it back to the real pointer"`
 }
 
+type mouseInput struct {
+	afterInput
+	mouseAction
+}
+
 func (s *Server) mouse(ctx context.Context, _ *mcpsdk.CallToolRequest, in mouseInput) (*mcpsdk.CallToolResult, InputOutput, error) {
 	if err := s.requireInput(); err != nil {
 		return nil, InputOutput{}, err
 	}
 
-	button, err := parseButton(in.Button)
+	out, err := s.applyMouse(ctx, in.mouseAction)
 	if err != nil {
 		return nil, InputOutput{}, err
+	}
+
+	return s.finish(ctx, in.afterInput, out)
+}
+
+// applyMouse does one mouse action and says what it did. Shared with
+// game_script, which is why it takes the action rather than the tool's input.
+func (s *Server) applyMouse(ctx context.Context, in mouseAction) (InputOutput, error) {
+	button, err := parseButton(in.Button)
+	if err != nil {
+		return InputOutput{}, err
 	}
 
 	inj := s.rt.Injector()
@@ -280,16 +305,16 @@ func (s *Server) mouse(ctx context.Context, _ *mcpsdk.CallToolRequest, in mouseI
 	switch {
 	case in.ToX != nil && in.ToY != nil:
 		if in.X == nil || in.Y == nil {
-			return nil, InputOutput{}, fmt.Errorf("a drag needs a starting x and y as well as to_x and to_y")
+			return InputOutput{}, fmt.Errorf("a drag needs a starting x and y as well as to_x and to_y")
 		}
 		if err := s.drag(ctx, *in.X, *in.Y, *in.ToX, *in.ToY, button, in.Steps); err != nil {
-			return nil, InputOutput{}, err
+			return InputOutput{}, err
 		}
 		out.DraggedTo = []float64{*in.ToX, *in.ToY}
 
 	case in.Click:
 		if err := s.click(ctx, button); err != nil {
-			return nil, InputOutput{}, err
+			return InputOutput{}, err
 		}
 		out.Clicked = in.Button
 
@@ -302,7 +327,7 @@ func (s *Server) mouse(ctx context.Context, _ *mcpsdk.CallToolRequest, in mouseI
 		out.Button = in.Button
 	}
 
-	return s.finish(ctx, in.afterInput, out)
+	return out, nil
 }
 
 // drag walks the cursor across several ticks with the button held.
