@@ -607,6 +607,84 @@ func TestScriptToolReleasesWhatItPressedWhenItFails(t *testing.T) {
 	}
 }
 
+// TestMouseSaysWhichButtonItUsed.
+//
+// Found by driving the tools over the protocol rather than by calling the
+// handlers, which is the difference that matters here: `{"click": true}` with no
+// button is the ordinary call, and it answered with nothing but a tick. The
+// field carried the string the caller typed, which is empty whenever they let it
+// default, and omitempty then removed it entirely.
+func TestMouseSaysWhichButtonItUsed(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := testRT.InputError(); err != nil {
+		t.Skipf("input injection is unavailable here: %v", err)
+	}
+
+	x, y := 40.0, 40.0
+
+	_, out, err := s.mouse(ctx, nil, mouseInput{mouseAction: mouseAction{X: &x, Y: &y, Click: true}})
+	if err != nil {
+		t.Fatalf("game_mouse: %v", err)
+	}
+	if out.Clicked != "left" {
+		t.Errorf("a click with no button named answered clicked=%q, want left", out.Clicked)
+	}
+
+	if _, out, err = s.mouse(ctx, nil, mouseInput{mouseAction: mouseAction{Down: true}}); err != nil {
+		t.Fatalf("game_mouse down: %v", err)
+	}
+	if out.Holding != "left" {
+		t.Errorf("a press with no button named answered holding=%q, want left", out.Holding)
+	}
+
+	if _, out, err = s.mouse(ctx, nil, mouseInput{mouseAction: mouseAction{Up: true, Button: "right"}}); err != nil {
+		t.Fatalf("game_mouse up: %v", err)
+	}
+	if out.Button != "right" {
+		t.Errorf("a release of the right button answered %q", out.Button)
+	}
+}
+
+// TestInputStateAnswersWithArraysNotNulls.
+//
+// Four fields are declared as arrays and were nil whenever nothing was pressed —
+// which is the normal state of a game nobody is driving. A nil slice marshals to
+// null, and a client looping over what its schema promised is an array meets
+// null almost every time it looks.
+func TestInputStateAnswersWithArraysNotNulls(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	_, out, err := s.inputState(ctx, nil, emptyInput{})
+	if err != nil {
+		t.Fatalf("game_input_state: %v", err)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshalling: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshalling: %v", err)
+	}
+
+	for _, field := range []string{"keys_pressed", "mouse_buttons", "touches", "gamepads"} {
+		if raw[field] == nil {
+			t.Errorf("%s came back as null; its schema says array", field)
+		}
+	}
+}
+
 // TestScriptStepDoesEverythingAMouseCallDoes.
 //
 // A script step used to take seven of game_mouse's twelve fields, so a sequence

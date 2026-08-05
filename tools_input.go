@@ -312,19 +312,24 @@ func (s *Server) applyMouse(ctx context.Context, in mouseAction) (InputOutput, e
 		}
 		out.DraggedTo = []float64{*in.ToX, *in.ToY}
 
+	// The button that was used, not the string that was typed. in.Button is
+	// empty whenever the caller lets it default to left — which is most of the
+	// time — and with omitempty on the way out that made a click, a press and a
+	// release report nothing at all. The tool did the thing and said so only
+	// when it was told which button in words.
 	case in.Click:
 		if err := s.click(ctx, button); err != nil {
 			return InputOutput{}, err
 		}
-		out.Clicked = in.Button
+		out.Clicked = buttonName(button)
 
 	case in.Down:
 		inj.MouseDown(button)
-		out.Holding = in.Button
+		out.Holding = buttonName(button)
 
 	case in.Up:
 		inj.MouseUp(button)
-		out.Button = in.Button
+		out.Button = buttonName(button)
 	}
 
 	return out, nil
@@ -492,8 +497,12 @@ func (s *Server) inputState(ctx context.Context, _ *mcpsdk.CallToolRequest, _ em
 	return nil, out, nil
 }
 
+// The four readers below start from an empty slice rather than a nil one. They
+// are declared as arrays in the output schema, and "nothing is pressed" is the
+// normal state — so a nil, which marshals to null, is what a client would meet
+// almost every time it looked, and iterating null is not a thing.
 func pressedKeys() []string {
-	var keys []string
+	keys := []string{}
 	for _, k := range inpututil.AppendPressedKeys(nil) {
 		keys = append(keys, k.String())
 	}
@@ -501,7 +510,7 @@ func pressedKeys() []string {
 }
 
 func pressedMouseButtons() []string {
-	var names []string
+	names := []string{}
 	for _, b := range []ebiten.MouseButton{ebiten.MouseButtonLeft, ebiten.MouseButtonRight, ebiten.MouseButtonMiddle} {
 		if ebiten.IsMouseButtonPressed(b) {
 			names = append(names, buttonName(b))
@@ -511,7 +520,7 @@ func pressedMouseButtons() []string {
 }
 
 func activeTouches() []touchPoint {
-	var touches []touchPoint
+	touches := []touchPoint{}
 	for _, id := range ebiten.AppendTouchIDs(nil) {
 		x, y := ebiten.TouchPosition(id)
 		touches = append(touches, touchPoint{ID: int(id), X: x, Y: y})
@@ -525,17 +534,17 @@ func activeTouches() []touchPoint {
 // of controller this is, so seeing it is often the whole answer to "why is the
 // game ignoring my gamepad".
 func connectedGamepads() []GamepadState {
-	var pads []GamepadState
+	pads := []GamepadState{}
 
 	for _, id := range ebiten.AppendGamepadIDs(nil) {
-		var pressed []int
+		pressed := []int{}
 		for b := 0; b < ebiten.GamepadButtonCount(id); b++ {
 			if ebiten.IsGamepadButtonPressed(id, ebiten.GamepadButton(b)) {
 				pressed = append(pressed, b)
 			}
 		}
 
-		var axes []float64
+		axes := []float64{}
 		for a := 0; a < ebiten.GamepadAxisCount(id); a++ {
 			axes = append(axes, ebiten.GamepadAxisValue(id, a))
 		}
