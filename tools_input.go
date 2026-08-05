@@ -441,11 +441,11 @@ func (s *Server) applyTouches(points []touchPoint) {
 // game_input_state
 // ---------------------------------------------------------------------------
 
-func (s *Server) inputState(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) inputState(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, InputStateOutput, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
-	out := map[string]any{"injection": s.inputStatus()}
+	out := InputStateOutput{Injection: s.inputStatus()}
 
 	// Read from inside the loop: input state is only coherent for the tick it
 	// belongs to, and reading it from outside would mix two of them.
@@ -453,17 +453,17 @@ func (s *Server) inputState(ctx context.Context, _ *mcpsdk.CallToolRequest, _ em
 		cx, cy := ebiten.CursorPosition()
 		wx, wy := ebiten.Wheel()
 
-		out["keys_pressed"] = pressedKeys()
-		out["mouse_buttons"] = pressedMouseButtons()
-		out["touches"] = activeTouches()
-		out["gamepads"] = connectedGamepads()
-		out["cursor"] = map[string]int{"x": cx, "y": cy}
-		out["wheel"] = map[string]float64{"x": wx, "y": wy}
+		out.KeysPressed = pressedKeys()
+		out.MouseButtons = pressedMouseButtons()
+		out.Touches = activeTouches()
+		out.Gamepads = connectedGamepads()
+		out.Cursor = Point{X: cx, Y: cy}
+		out.Wheel = Offset{X: wx, Y: wy}
 	}); err != nil {
-		return nil, nil, s.stalled(err)
+		return nil, InputStateOutput{}, s.stalled(err)
 	}
 
-	out["tick"] = s.rt.Tick()
+	out.Tick = s.rt.Tick()
 	return nil, out, nil
 }
 
@@ -499,8 +499,8 @@ func activeTouches() []touchPoint {
 // The SDL id is here because it is what a game switches on to decide what kind
 // of controller this is, so seeing it is often the whole answer to "why is the
 // game ignoring my gamepad".
-func connectedGamepads() []map[string]any {
-	var pads []map[string]any
+func connectedGamepads() []GamepadState {
+	var pads []GamepadState
 
 	for _, id := range ebiten.AppendGamepadIDs(nil) {
 		var pressed []int
@@ -515,13 +515,13 @@ func connectedGamepads() []map[string]any {
 			axes = append(axes, ebiten.GamepadAxisValue(id, a))
 		}
 
-		pads = append(pads, map[string]any{
-			"id":              int(id),
-			"name":            ebiten.GamepadName(id),
-			"sdl_id":          ebiten.GamepadSDLID(id),
-			"standard_layout": ebiten.IsStandardGamepadLayoutAvailable(id),
-			"buttons_pressed": pressed,
-			"axes":            axes,
+		pads = append(pads, GamepadState{
+			ID:             int(id),
+			Name:           ebiten.GamepadName(id),
+			SDLID:          ebiten.GamepadSDLID(id),
+			StandardLayout: ebiten.IsStandardGamepadLayoutAvailable(id),
+			ButtonsPressed: pressed,
+			Axes:           axes,
 		})
 	}
 	return pads

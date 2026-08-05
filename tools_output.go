@@ -87,6 +87,137 @@ type RingStatus struct {
 	Note       string  `json:"note,omitempty"`
 }
 
+// StateOutput is game_state's answer: how the game and the process are doing.
+//
+// A struct with three optional fields, not a map. It looked like a map's job
+// because so much goes in it, but nothing about its shape depends on what the
+// tool found — only its values do, and a field that is sometimes absent is what
+// omitempty is for.
+type StateOutput struct {
+	Name          string `json:"name"`
+	Loop          string `json:"loop"`
+	Tick          int64  `json:"tick"`
+	SinceLastTick string `json:"since_last_tick"`
+	Uptime        string `json:"uptime"`
+	Paused        bool   `json:"paused"`
+	QueuedSteps   int    `json:"queued_steps"`
+
+	TPS       int     `json:"tps"`
+	ActualTPS float64 `json:"actual_tps"`
+	ActualFPS float64 `json:"actual_fps"`
+	VSync     bool    `json:"vsync"`
+
+	Window            Size    `json:"window"`
+	DeviceScaleFactor float64 `json:"device_scale_factor"`
+	Screen            *Screen `json:"screen,omitempty"`
+
+	Input          InputStatus `json:"input"`
+	Go             GoStats     `json:"go"`
+	StateProviders []string    `json:"state_providers"`
+	MediaDir       string      `json:"media_dir"`
+	FrameRing      RingStatus  `json:"frame_ring"`
+
+	Crash       *Crash      `json:"crash,omitempty"`
+	CrashTraces []TraceLine `json:"crash_traces,omitempty"`
+}
+
+// Screen is the last frame's size and when it was taken.
+type Screen struct {
+	Width          int   `json:"width"`
+	Height         int   `json:"height"`
+	CapturedAtTick int64 `json:"captured_at_tick"`
+}
+
+// InputStatus says whether synthetic input works, and why not when it does not.
+type InputStatus struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// GoStats is what the runtime says about itself.
+type GoStats struct {
+	Version    string  `json:"version"`
+	Goroutines int     `json:"goroutines"`
+	HeapMB     float64 `json:"heap_mb"`
+	GCCycles   uint32  `json:"gc_cycles"`
+}
+
+// FrametimesOutput is game_frametimes' answer.
+type FrametimesOutput struct {
+	Ticks int `json:"ticks"`
+
+	Update Percentiles `json:"update,omitempty"`
+	Draw   Percentiles `json:"draw,omitempty"`
+	Wall   Percentiles `json:"wall,omitempty"`
+
+	ActualTPS float64 `json:"actual_tps,omitempty"`
+	ActualFPS float64 `json:"actual_fps,omitempty"`
+
+	// Reading is the sentence that says what the numbers mean, because the
+	// interesting part of them is a comparison and not any one figure.
+	Reading string `json:"reading,omitempty"`
+
+	Timings []FrameTiming `json:"timings,omitempty"`
+}
+
+// Percentiles summarises one column of the frame timings. Durations as text,
+// because "1.2ms" is what somebody reading this wants and a nanosecond count is
+// not.
+type Percentiles struct {
+	Mean string `json:"mean"`
+	P50  string `json:"p50"`
+	P95  string `json:"p95"`
+	P99  string `json:"p99"`
+	Max  string `json:"max"`
+}
+
+// GoroutinesOutput is game_goroutines' answer. The dump itself comes back as
+// text, since it is for reading rather than for parsing.
+type GoroutinesOutput struct {
+	Count int `json:"count"`
+}
+
+// InputStateOutput is game_input_state's answer: what the game currently
+// believes about its input, read from inside the loop.
+type InputStateOutput struct {
+	Tick      int64       `json:"tick"`
+	Injection InputStatus `json:"injection"`
+
+	KeysPressed  []string       `json:"keys_pressed"`
+	MouseButtons []string       `json:"mouse_buttons"`
+	Touches      []touchPoint   `json:"touches"`
+	Gamepads     []GamepadState `json:"gamepads"`
+
+	Cursor Point  `json:"cursor"`
+	Wheel  Offset `json:"wheel"`
+}
+
+// Point is a cursor position in the game's logical pixels.
+type Point struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+// Offset is a wheel movement.
+type Offset struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// GamepadState is one controller as the game sees it.
+//
+// The SDL id is here because it is what a game switches on to decide what kind
+// of controller this is, so seeing it is often the whole answer to "why is the
+// game ignoring my gamepad".
+type GamepadState struct {
+	ID             int       `json:"id"`
+	Name           string    `json:"name"`
+	SDLID          string    `json:"sdl_id"`
+	StandardLayout bool      `json:"standard_layout"`
+	ButtonsPressed []int     `json:"buttons_pressed"`
+	Axes           []float64 `json:"axes"`
+}
+
 // LoopOutput is what the tools that hold and release the game answer with.
 type LoopOutput struct {
 	Tick        int64  `json:"tick"`

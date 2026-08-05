@@ -24,20 +24,15 @@ import (
 // the handlers are called directly, against the same live game the rest of the
 // file drives.
 
-// untypedOutput are the tools whose answers are still maps.
+// untypedOutput was the list of tools still answering with a map, and it is
+// empty.
 //
-// Four left, and not an oversight: each returns something shaped by what it
-// found rather than by what it was asked. game_state describes a whole process
-// — window, renderer, memory, the buffer, a crash if there is one; game_state
-// and game_input_state both grow a field whenever Ebitengine does. Typing them
-// means deciding what the contract is, which is a design question and not a
-// transcription. Kept as a list so the number is visible and can only go down.
-var untypedOutput = map[string]bool{
-	"game_state":       true,
-	"game_frametimes":  true,
-	"game_goroutines":  true,
-	"game_input_state": true,
-}
+// It survives as an empty map on purpose, with the test that reads it, so that
+// adding a tool without an output schema fails rather than passes. The reason
+// given for the last four — that their shape depends on what they found — did
+// not hold up when it was looked at: what varies is how many gamepads there are,
+// not which fields exist, and a slice is the answer to the first.
+var untypedOutput = map[string]bool{}
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -245,14 +240,14 @@ func TestStateToolAnswersWithoutTheLoop(t *testing.T) {
 		t.Fatalf("game_state on a paused game: %v", err)
 	}
 
-	state := out.(map[string]any)
-	if state["paused"] != true {
-		t.Errorf("game_state says paused=%v on a paused game", state["paused"])
+	if !out.Paused {
+		t.Error("game_state says the game is not paused when it is")
 	}
-	for _, key := range []string{"tick", "loop", "go", "input", "frame_ring", "media_dir"} {
-		if _, ok := state[key]; !ok {
-			t.Errorf("game_state has no %q", key)
-		}
+	if out.Loop != "paused" {
+		t.Errorf("game_state calls the loop %q on a paused game", out.Loop)
+	}
+	if out.Tick == 0 || out.Go.Version == "" || out.MediaDir == "" {
+		t.Errorf("game_state left something empty that always has a value: %+v", out)
 	}
 }
 
@@ -310,9 +305,8 @@ func TestInspectToolReturnsARegisteredSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("game_state: %v", err)
 	}
-	if !contains(state.(map[string]any)["state_providers"].([]string), "probe") {
-		t.Errorf("game_state does not list the registered snapshot: %v",
-			state.(map[string]any)["state_providers"])
+	if !contains(state.StateProviders, "probe") {
+		t.Errorf("game_state does not list the registered snapshot: %v", state.StateProviders)
 	}
 }
 
@@ -631,11 +625,11 @@ func TestFrametimesToolSplitsUpdateFromDraw(t *testing.T) {
 		t.Fatalf("game_frametimes: %v", err)
 	}
 
-	timings := out.(map[string]any)
-	for _, key := range []string{"update", "draw", "wall", "reading"} {
-		if _, ok := timings[key]; !ok {
-			t.Errorf("game_frametimes has no %q", key)
-		}
+	if out.Update.Mean == "" || out.Draw.Mean == "" || out.Wall.Mean == "" {
+		t.Errorf("game_frametimes left a column empty: %+v", out)
+	}
+	if out.Ticks == 0 {
+		t.Error("game_frametimes summarised no ticks")
 	}
 }
 
@@ -678,7 +672,7 @@ func TestGoroutinesToolAnswersWhenTheLoopIsWedged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("game_goroutines on a blocked loop: %v", err)
 	}
-	if out.(map[string]any)["count"].(int) == 0 {
+	if out.Count == 0 {
 		t.Error("game_goroutines counted none")
 	}
 

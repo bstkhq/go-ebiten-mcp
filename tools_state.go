@@ -61,54 +61,49 @@ func (s *Server) addStateTools(srv *mcpsdk.Server) {
 // game_state
 // ---------------------------------------------------------------------------
 
-func (s *Server) state(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) state(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*mcpsdk.CallToolResult, StateOutput, error) {
 	paused, steps := s.rt.Paused()
 	sinceTick := time.Since(s.rt.LastTick())
-	loop := s.loopState(paused, sinceTick)
 
 	w, h := ebiten.WindowSize()
 
-	out := map[string]any{
-		"name":            s.opts.Name,
-		"loop":            loop,
-		"tick":            s.rt.Tick(),
-		"since_last_tick": sinceTick.Round(time.Millisecond).String(),
-		"uptime":          s.rt.Uptime().Round(time.Second).String(),
-		"paused":          paused,
-		"queued_steps":    steps,
+	out := StateOutput{
+		Name:          s.opts.Name,
+		Loop:          s.loopState(paused, sinceTick),
+		Tick:          s.rt.Tick(),
+		SinceLastTick: sinceTick.Round(time.Millisecond).String(),
+		Uptime:        s.rt.Uptime().Round(time.Second).String(),
+		Paused:        paused,
+		QueuedSteps:   steps,
 
-		"tps":        ebiten.TPS(),
-		"actual_tps": round2(ebiten.ActualTPS()),
-		"actual_fps": round2(ebiten.ActualFPS()),
-		"vsync":      ebiten.IsVsyncEnabled(),
+		TPS:       ebiten.TPS(),
+		ActualTPS: round2(ebiten.ActualTPS()),
+		ActualFPS: round2(ebiten.ActualFPS()),
+		VSync:     ebiten.IsVsyncEnabled(),
 
-		"window":              map[string]int{"width": w, "height": h},
-		"device_scale_factor": round2(ebiten.Monitor().DeviceScaleFactor()),
+		Window:            Size{Width: w, Height: h},
+		DeviceScaleFactor: round2(ebiten.Monitor().DeviceScaleFactor()),
 
-		"input": s.inputStatus(),
-
-		"go": goStats(),
-
-		"state_providers": s.rt.stateProviderNames(),
-		"media_dir":       s.media.dir,
-		"frame_ring":      s.rt.Ring().Status(),
+		Input:          s.inputStatus(),
+		Go:             goStats(),
+		StateProviders: s.rt.stateProviderNames(),
+		MediaDir:       s.media.dir,
+		FrameRing:      s.rt.Ring().Status(),
 	}
 
 	if frame := s.rt.LastFrame(); frame != nil {
 		b := frame.Image.Bounds()
-		out["screen"] = map[string]any{"width": b.Dx(), "height": b.Dy(), "captured_at_tick": frame.Tick}
+		out.Screen = &Screen{Width: b.Dx(), Height: b.Dy(), CapturedAtTick: frame.Tick}
 	}
 
 	if crash := s.rt.Crash(); crash != nil {
-		out["crash"] = crash
+		out.Crash = crash
 
 		// What the game printed on its way down, without having to ask for it
 		// separately. The lines around a panic are usually the reason for it,
 		// and needing a second call to see them is needing a second call at
 		// exactly the moment somebody is in a hurry.
-		if lines := s.crashTraces(crash); len(lines) > 0 {
-			out["crash_traces"] = lines
-		}
+		out.CrashTraces = s.crashTraces(crash)
 	}
 
 	return nil, out, nil
@@ -139,30 +134,26 @@ func (s *Server) loopState(paused bool, sinceTick time.Duration) string {
 	}
 }
 
-func goStats() map[string]any {
+func goStats() GoStats {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
-	return map[string]any{
-		"version":    runtime.Version(),
-		"goroutines": runtime.NumGoroutine(),
-		"heap_mb":    round2(float64(mem.HeapAlloc) / (1 << 20)),
-		"gc_cycles":  mem.NumGC,
+	return GoStats{
+		Version:    runtime.Version(),
+		Goroutines: runtime.NumGoroutine(),
+		HeapMB:     round2(float64(mem.HeapAlloc) / (1 << 20)),
+		GCCycles:   mem.NumGC,
 	}
 }
 
-func (s *Server) inputStatus() map[string]any {
-	status := map[string]any{"available": true}
-
+func (s *Server) inputStatus() InputStatus {
 	if err := s.rt.InputError(); err != nil {
-		status["available"] = false
-		status["reason"] = err.Error()
+		return InputStatus{Reason: err.Error()}
 	}
 	if s.rt.Tick() == 0 {
-		status["available"] = false
-		status["reason"] = "not checked yet: the game has not run a tick"
+		return InputStatus{Reason: "not checked yet: the game has not run a tick"}
 	}
-	return status
+	return InputStatus{Available: true}
 }
 
 func round2(v float64) float64 {
@@ -253,25 +244,25 @@ type frametimesInput struct {
 	Verbose bool `json:"verbose,omitempty" jsonschema:"include every tick, not only the summary"`
 }
 
-func (s *Server) frametimes(_ context.Context, _ *mcpsdk.CallToolRequest, in frametimesInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) frametimes(_ context.Context, _ *mcpsdk.CallToolRequest, in frametimesInput) (*mcpsdk.CallToolResult, FrametimesOutput, error) {
 	timings := s.rt.Timings()
 	if in.Last > 0 && in.Last < len(timings) {
 		timings = timings[len(timings)-in.Last:]
 	}
 
 	if len(timings) == 0 {
-		return nil, map[string]any{"ticks": 0}, nil
+		return nil, FrametimesOutput{}, nil
 	}
 
 	update := summarise(timings, func(t FrameTiming) int64 { return t.Update })
 	draw := summarise(timings, func(t FrameTiming) int64 { return t.Draw })
 	wall := summarise(timings, func(t FrameTiming) int64 { return t.Wall })
 
-	out := map[string]any{
-		"ticks":  len(timings),
-		"update": update,
-		"draw":   draw,
-		"wall":   wall,
+	out := FrametimesOutput{
+		Ticks:  len(timings),
+		Update: update,
+		Draw:   draw,
+		Wall:   wall,
 
 		// The rate the engine reports is the honest headline. Percentiles of the
 		// gap between ticks are not: when the engine falls behind it runs a
@@ -279,12 +270,12 @@ func (s *Server) frametimes(_ context.Context, _ *mcpsdk.CallToolRequest, in fra
 		// microseconds and a few are enormous, and the median of that says
 		// nothing at all. The mean survives it, because it is elapsed time over
 		// ticks either way.
-		"actual_tps": round2(ebiten.ActualTPS()),
-		"actual_fps": round2(ebiten.ActualFPS()),
-		"reading":    reading(update, draw, wall),
+		ActualTPS: round2(ebiten.ActualTPS()),
+		ActualFPS: round2(ebiten.ActualFPS()),
+		Reading:   reading(update, draw, wall),
 	}
 	if in.Verbose {
-		out["timings"] = timings
+		out.Timings = timings
 	}
 	return nil, out, nil
 }
@@ -299,10 +290,10 @@ func (s *Server) frametimes(_ context.Context, _ *mcpsdk.CallToolRequest, in fra
 // It compares against the mean gap between ticks rather than the median, for
 // the catch-up reason above: the mean is total elapsed time over ticks, which is
 // the tick period whether or not the engine is bunching updates.
-func reading(update, draw, wall map[string]any) string {
-	updateNs, ok1 := nanos(update["mean"])
-	drawNs, ok2 := nanos(draw["mean"])
-	w, ok3 := nanos(wall["mean"])
+func reading(update, draw, wall Percentiles) string {
+	updateNs, ok1 := nanos(update.Mean)
+	drawNs, ok2 := nanos(draw.Mean)
+	w, ok3 := nanos(wall.Mean)
 	if !ok1 || !ok2 || !ok3 || w == 0 {
 		return ""
 	}
@@ -318,11 +309,9 @@ func reading(update, draw, wall map[string]any) string {
 
 // nanos parses back a formatted duration, since summarise already rounded them
 // for display.
-func nanos(v any) (int64, bool) {
-	s, ok := v.(string)
-	if !ok {
-		return 0, false
-	}
+// nanos parses one of the durations summarise formatted. Text in, number out,
+// which is the price of the summary being readable.
+func nanos(s string) (int64, bool) {
 	d, err := time.ParseDuration(s)
 	if err != nil {
 		return 0, false
@@ -332,7 +321,7 @@ func nanos(v any) (int64, bool) {
 
 // summarise reports percentiles rather than an average. A game that stutters
 // has a fine mean and a terrible p99, and the mean is what hides it.
-func summarise(timings []FrameTiming, get func(FrameTiming) int64) map[string]any {
+func summarise(timings []FrameTiming, get func(FrameTiming) int64) Percentiles {
 	values := make([]int64, 0, len(timings))
 	var total int64
 
@@ -348,12 +337,12 @@ func summarise(timings []FrameTiming, get func(FrameTiming) int64) map[string]an
 		return time.Duration(values[i]).Round(time.Microsecond).String()
 	}
 
-	return map[string]any{
-		"mean": time.Duration(total / int64(len(values))).Round(time.Microsecond).String(),
-		"p50":  pct(0.50),
-		"p95":  pct(0.95),
-		"p99":  pct(0.99),
-		"max":  time.Duration(values[len(values)-1]).Round(time.Microsecond).String(),
+	return Percentiles{
+		Mean: time.Duration(total / int64(len(values))).Round(time.Microsecond).String(),
+		P50:  pct(0.50),
+		P95:  pct(0.95),
+		P99:  pct(0.99),
+		Max:  time.Duration(values[len(values)-1]).Round(time.Microsecond).String(),
 	}
 }
 
@@ -365,12 +354,12 @@ type goroutinesInput struct {
 	All bool `json:"all,omitempty" jsonschema:"include every goroutine rather than only those in the game and this server"`
 }
 
-func (s *Server) goroutines(_ context.Context, _ *mcpsdk.CallToolRequest, in goroutinesInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) goroutines(_ context.Context, _ *mcpsdk.CallToolRequest, in goroutinesInput) (*mcpsdk.CallToolResult, GoroutinesOutput, error) {
 	var sb strings.Builder
 
 	profile := pprof.Lookup("goroutine")
 	if err := profile.WriteTo(&sb, 2); err != nil {
-		return nil, nil, err
+		return nil, GoroutinesOutput{}, err
 	}
 
 	dump := sb.String()
@@ -379,10 +368,8 @@ func (s *Server) goroutines(_ context.Context, _ *mcpsdk.CallToolRequest, in gor
 	}
 
 	return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: dump}},
-		}, map[string]any{
-			"count": runtime.NumGoroutine(),
-		}, nil
+		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: dump}},
+	}, GoroutinesOutput{Count: runtime.NumGoroutine()}, nil
 }
 
 // interestingGoroutines drops the ones that are always there and always idle,
