@@ -164,13 +164,41 @@ func (s *Server) mcp() *mcpsdk.Server {
 	return s.srv
 }
 
+// instructions reach every client in the initialize response, so they are in
+// context for a whole session whether anybody wanted them there or not. That is
+// what keeps this short: only the handful of things that are true of every
+// session, that no single tool's description can say on its own, and that cost
+// somebody a wasted call to find out.
+//
+// Everything else belongs to the tool that needs it — the descriptions already
+// carry when to reach for each one and which to prefer — or to the skill that
+// ebitenmcp init installs, which is loaded when it is relevant instead of
+// always.
+const instructions = `This game is running and can be looked at while it runs.
+
+Four things worth knowing before the first call:
+
+- Start with game_state. It says whether the loop is running, paused, or has
+  panicked, and it keeps answering when the game itself has stopped — as do
+  game_traces and game_goroutines. A tool that hangs is not the same as a game
+  that crashed, and these tell you which you have.
+- game_frames is retrospective, but it has to be switched on before the thing
+  you want to see. Enable it, reproduce the problem, then ask; asking first
+  gets you nothing.
+- Captures come from the final screen by default, which is what the player
+  sees. Ask for stage: "offscreen" for anything you are going to compare
+  between runs — the final screen is the size of the window, so it changes with
+  the monitor.
+- Showing a change is a screenshot, not a description of one. The input tools
+  take then_wait_ticks and then_screenshot, so acting and looking is one call.`
+
 func (s *Server) buildMCP() *mcpsdk.Server {
 	srv := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:        "go-ebiten-mcp",
 		Title:       "Ebitengine game: " + s.opts.Name,
 		Description: "See, drive and inspect a running Ebitengine game: frames and video, loop control, state, traces and synthetic input.",
 		Version:     "1",
-	}, nil)
+	}, &mcpsdk.ServerOptions{Instructions: instructions})
 
 	s.addViewTools(srv)
 	s.addLoopTools(srv)

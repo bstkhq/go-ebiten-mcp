@@ -14,29 +14,24 @@ import (
 // tools get into the agent's list at all. The note in CLAUDE.md is how it knows
 // to reach for them instead of guessing from the source what the game looks
 // like — a tool list says what is possible, not what is worth doing.
+//
+// It deliberately does not drop a copy of this project's SKILL.md into
+// somebody's repository. How to work with the tools comes from the game itself,
+// in the instructions its server sends when a client connects, so it can never
+// be out of date with the server answering the calls — where a copied file
+// would be right the day it was written and stale from the next release on.
 
 const claudeSection = `## Seeing the game run
 
 This project is wired to go-ebiten-mcp, so the game can be looked at and driven
-while it runs.
+while it runs: screenshots, synthetic input, its own state by path, and the
+frames leading up to a crash. Reach for those tools instead of reasoning about
+the source when the question is what the game actually does, and show a change
+as a screenshot rather than a description of one.
 
-If the game is already running — which on a machine with a screen it usually is —
-its tools are already there. If it is not, ` + "`game_start`" + ` runs it, bringing up a
-display first on a machine that has none.
-
-Reach for them instead of reasoning about the source when the question is what
-the game actually does:
-
-- ` + "`game_screenshot`" + ` to see the current frame, ` + "`game_record`" + ` for a grid of frames
-  over time, which is how motion reads.
-- ` + "`game_key`" + `, ` + "`game_mouse`" + `, ` + "`game_touch`" + ` and ` + "`game_type`" + ` to drive it. They take
-  ` + "`then_wait_ticks`" + ` and ` + "`then_screenshot`" + `, so acting and looking is one call.
-- ` + "`game_inspect`" + ` to read the game's own state by path, unexported fields
-  included, when the pixels are not enough to say why.
-- ` + "`game_state`" + `, ` + "`game_traces`" + ` and ` + "`game_frametimes`" + ` when it misbehaves. They keep
-  answering after the game has panicked or deadlocked, and they say which.
-
-Showing a change is a screenshot, not a description of one.
+The server sends the rest — where to start, what to switch on before
+reproducing a problem, and which tools still answer once the game has stopped —
+when a client connects to it.
 `
 
 func initCommand(args []string) error {

@@ -150,6 +150,10 @@ what comes back is a picture.
 - **[docs/guide.md](docs/guide.md)** — how the input injection works, running
   headless and in containers, golden images across renderers, gamepad
   identities, and what the capture stages cost.
+- **[SKILL.md](SKILL.md)** — how a debugging session goes: where to start, what
+  to switch on before reproducing a problem, and which tools still answer once
+  the game has stopped. The server sends the short version of it to every client
+  that connects.
 - **`examples/playground`** — seven screens, each stressing one part of the
   system. `make run` starts it.
 

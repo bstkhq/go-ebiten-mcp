@@ -1,6 +1,7 @@
 package ebitenmcp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -252,4 +253,52 @@ func textOf(result *mcpsdk.CallToolResult) (int, string) {
 		}
 	}
 	return images, text
+}
+
+// TestTheServerIntroducesItself.
+//
+// The initialize response is the one thing every client gets before it does
+// anything, and until this it carried nothing but a name. What goes in there is
+// in context for a whole session, so the value of testing it is less that the
+// text arrives — a constant in a struct literal generally does — than that it
+// stays short and stays true: the numbers below are the budget, and the tools it
+// names have to exist.
+func TestTheServerIntroducesItself(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	session := newTestSession(t, ctx, s)
+
+	got := session.InitializeResult().Instructions
+	if got == "" {
+		t.Fatal("the server introduces itself with nothing at all")
+	}
+
+	// Long enough to be worth the round trip, short enough that a client is not
+	// paying for a manual on every session. The skill ebitenmcp init installs is
+	// where the long version goes, because it is loaded when it is relevant.
+	if n := len(got); n < 200 || n > 1500 {
+		t.Errorf("the instructions are %d characters; they belong between 200 and 1500", n)
+	}
+
+	// Everything they tell a client to reach for has to be something it can.
+	tools := listTools(t, ctx, s)
+	for _, name := range []string{"game_state", "game_traces", "game_goroutines", "game_frames"} {
+		if !strings.Contains(got, name) {
+			t.Errorf("the instructions no longer mention %s", name)
+			continue
+		}
+		if tools[name] == nil {
+			t.Errorf("the instructions send a client to %s, which is not registered", name)
+		}
+	}
+
+	// The two spellings that decide what a capture is worth comparing.
+	for _, want := range []string{"offscreen", "then_screenshot"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the instructions no longer mention %q", want)
+		}
+	}
 }
