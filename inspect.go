@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -371,32 +372,40 @@ func fieldNames(t reflect.Type) []string {
 // must not block.
 type StateProvider func(game ebiten.Game) any
 
-// RegisterState publishes a named snapshot. Registering the same name twice
-// replaces it.
-func (r *Runtime) RegisterState(name string, fn StateProvider) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// stateProviders is what a game has published about itself.
+//
+// Its own type with its own lock: it is a map somebody writes once at startup
+// and the tools read, with no bearing on whether the game is running, paused or
+// crashed. The game it hands the provider comes from the runtime at call time,
+// which is the one thing it does need and the reason that is a parameter.
+type stateProviders struct {
+	mu sync.Mutex
+	by map[string]StateProvider
+}
 
-	if r.states == nil {
-		r.states = map[string]StateProvider{}
+func (s *stateProviders) register(name string, fn StateProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.by == nil {
+		s.by = map[string]StateProvider{}
 	}
-	r.states[name] = fn
+	s.by[name] = fn
 }
 
-// UnregisterState removes one.
-func (r *Runtime) UnregisterState(name string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (s *stateProviders) unregister(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	delete(r.states, name)
+	delete(s.by, name)
 }
 
-func (r *Runtime) stateProviderNames() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (s *stateProviders) names() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	names := make([]string, 0, len(r.states))
-	for name := range r.states {
+	names := make([]string, 0, len(s.by))
+	for name := range s.by {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -404,16 +413,31 @@ func (r *Runtime) stateProviderNames() []string {
 	return names
 }
 
+func (s *stateProviders) get(name string) (StateProvider, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fn, ok := s.by[name]
+	return fn, ok
+}
+
+// RegisterState publishes a named snapshot. Registering the same name twice
+// replaces it.
+func (r *Runtime) RegisterState(name string, fn StateProvider) {
+	r.states.register(name, fn)
+}
+
+// UnregisterState removes one.
+func (r *Runtime) UnregisterState(name string) { r.states.unregister(name) }
+
+func (r *Runtime) stateProviderNames() []string { return r.states.names() }
+
 // callStateProvider runs one against the game that is running now. Must be
 // called from inside the loop.
 func (r *Runtime) callStateProvider(name string) (any, bool) {
-	r.mu.Lock()
-	fn, ok := r.states[name]
-	game := r.game
-	r.mu.Unlock()
-
+	fn, ok := r.states.get(name)
 	if !ok {
 		return nil, false
 	}
-	return fn(game), true
+	return fn(r.currentGame()), true
 }

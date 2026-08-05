@@ -135,7 +135,7 @@ func Wrap(game ebiten.Game, opts ...Option) (ebiten.Game, *Runtime) {
 		rt.RegisterState(name, fn)
 	}
 	if o.CaptureStage != "" {
-		rt.defaultStage = o.CaptureStage
+		rt.captures.stage = o.CaptureStage
 	}
 
 	if o.Addr != "" {

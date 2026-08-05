@@ -449,6 +449,11 @@ func wrap(rt *Runtime) ebiten.Game {
 	rt.hasFinal, rt.hasLayoutF = finalScreen, layoutF
 	rt.mu.Unlock()
 
+	// The capture queue needs to know too: it is what decides whether asking for
+	// the final stage means a second image or the same one. Set before the loop
+	// starts, like the rest of this.
+	rt.captures.hasFinal = finalScreen
+
 	switch {
 	case layoutF && finalScreen:
 		return &wrapperLayoutFFinalScreen{&wrapperLayoutF{base}}

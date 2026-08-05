@@ -36,16 +36,6 @@ type Crash struct {
 	Phase string    `json:"phase"` // "update", "draw" or "final"
 }
 
-// FrameTiming is what one tick cost.
-type FrameTiming struct {
-	Tick   int64 `json:"tick"`
-	Update int64 `json:"update_ns"`
-	Draw   int64 `json:"draw_ns"`
-	Wall   int64 `json:"wall_ns"`
-}
-
-const frameTimingHistory = 600
-
 // Runtime is the state behind a wrapped game: the tick counter, the command
 // queue, the input injector and the captures.
 //
@@ -54,41 +44,53 @@ const frameTimingHistory = 600
 // from any goroutine at any time, on purpose: those are exactly the questions
 // worth asking when the loop has stopped answering.
 type Runtime struct {
+	// mu guards the loop's own state and nothing else. What used to be under it
+	// — the timing ring, the capture queue, the published snapshots — has moved
+	// to types of its own, because a mutex held by a dozen unrelated things
+	// stops telling anybody what it protects. See timings.go, capture.go and
+	// inspect.go.
 	mu sync.Mutex
 
+	// What the loop is running, and what to build a fresh one from.
 	game    ebiten.Game
 	factory func() ebiten.Game
 
+	// Injection, and whether the mirror it writes through was confirmed.
 	injector *hook.Injector
 	inputErr error
 	verified bool
 
+	// The clock. tickCh is closed and replaced on every tick, which is how
+	// WaitTicks is woken.
 	started  time.Time
 	tick     int64
 	lastTick time.Time
 	tickCh   chan struct{}
 
+	// Whether the game gets this tick.
 	paused      bool
 	steps       int
 	terminating bool
+	crash       *Crash
 
-	crash *Crash
-
-	timings  [frameTimingHistory]FrameTiming
-	ntimings int
-
+	// Work queued from other goroutines to run inside Update.
 	commands chan func()
 
-	captures     []captureRequest
-	lastFrame    *Frame
-	defaultStage Stage
-	hasFinal     bool
-	hasLayoutF   bool
+	// Which optional interfaces the wrapper was built for. Fixed before the loop
+	// starts and checked by SetGame, since Ebitengine asserts on the wrapper's
+	// concrete type and that cannot change.
+	hasFinal   bool
+	hasLayoutF bool
 
+	// Lazily created, so a game nobody looks at pays for none of them.
 	server   *Server
 	gamepads *Gamepads
 	ring     *frameRing
-	states   map[string]StateProvider
+
+	// Each with its own lock; see the note on mu.
+	timings  frameTimings
+	captures captures
+	states   stateProviders
 }
 
 // Server returns the MCP server serving this game, or nil when none was
@@ -138,13 +140,13 @@ func (r *Runtime) Close() error {
 
 func newRuntime(game ebiten.Game) *Runtime {
 	return &Runtime{
-		game:         game,
-		injector:     hook.NewInjector(),
-		started:      time.Now(),
-		lastTick:     time.Now(),
-		tickCh:       make(chan struct{}),
-		commands:     make(chan func(), 64),
-		defaultStage: StageFinal,
+		game:     game,
+		injector: hook.NewInjector(),
+		started:  time.Now(),
+		lastTick: time.Now(),
+		tickCh:   make(chan struct{}),
+		commands: make(chan func(), 64),
+		captures: captures{stage: StageFinal},
 	}
 }
 
@@ -349,21 +351,7 @@ func (r *Runtime) InputError() error {
 }
 
 // Timings returns the most recent frame timings, oldest first.
-func (r *Runtime) Timings() []FrameTiming {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	n := r.ntimings
-	if n > frameTimingHistory {
-		n = frameTimingHistory
-	}
-
-	out := make([]FrameTiming, 0, n)
-	for i := r.ntimings - n; i < r.ntimings; i++ {
-		out = append(out, r.timings[i%frameTimingHistory])
-	}
-	return out
-}
+func (r *Runtime) Timings() []FrameTiming { return r.timings.recent() }
 
 // SetGame replaces the running game with a new one at the next tick boundary.
 //
@@ -438,31 +426,11 @@ func (r *Runtime) currentGame() ebiten.Game {
 	return r.game
 }
 
-// recordDraw fills in the draw half of the current tick's timing. Draw runs
-// after Update, so the entry already exists by the time this is called.
-func (r *Runtime) recordDraw(d time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// recordDraw and addDraw are the wrapper's way into the timing ring; see
+// timings.go for why it is not part of this struct's state.
+func (r *Runtime) recordDraw(d time.Duration) { r.timings.setDraw(d) }
 
-	if r.ntimings == 0 {
-		return
-	}
-	r.timings[(r.ntimings-1)%frameTimingHistory].Draw = d.Nanoseconds()
-}
-
-// addDraw adds to the draw half of the current tick's timing, for the work that
-// happens after Draw returns: the game's final pass, and the copy a capture of
-// it needs. Keeping it in the same number is what lets game_frametimes answer
-// "is watching this costing me anything".
-func (r *Runtime) addDraw(d time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.ntimings == 0 {
-		return
-	}
-	r.timings[(r.ntimings-1)%frameTimingHistory].Draw += d.Nanoseconds()
-}
+func (r *Runtime) addDraw(d time.Duration) { r.timings.addDraw(d) }
 
 // drainCommands runs everything queued, but only what was already waiting when
 // it started. A command that queues another one therefore cannot starve the
@@ -508,21 +476,17 @@ func (r *Runtime) shouldUpdate() bool {
 // advance records that a tick completed and wakes everyone waiting on one.
 func (r *Runtime) advance(update, draw, wall time.Duration) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	r.tick++
 	r.lastTick = time.Now()
-
-	r.timings[r.ntimings%frameTimingHistory] = FrameTiming{
-		Tick:   r.tick,
-		Update: update.Nanoseconds(),
-		Draw:   draw.Nanoseconds(),
-		Wall:   wall.Nanoseconds(),
-	}
-	r.ntimings++
+	tick := r.tick
 
 	close(r.tickCh)
 	r.tickCh = make(chan struct{})
+	r.mu.Unlock()
+
+	// Outside the lock, and with its own: the timing ring is not loop state and
+	// nothing that reads it needs the loop to be still.
+	r.timings.add(tick, update, draw, wall)
 }
 
 // recordCrash stores a panic and stops the game being called again.

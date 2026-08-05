@@ -3,6 +3,7 @@ package ebitenmcp
 import (
 	"context"
 	"image"
+	"sync"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -55,63 +56,133 @@ func (r *Runtime) Capture(ctx context.Context) (*Frame, error) {
 // changes with the monitor is no golden at all.
 func (r *Runtime) CaptureStage(ctx context.Context, stage Stage) (*Frame, error) {
 	ch := make(chan *Frame, 1)
-
-	r.mu.Lock()
-	r.captures = append(r.captures, captureRequest{ch: ch, stage: stage})
-	r.mu.Unlock()
+	r.captures.add(captureRequest{ch: ch, stage: stage})
 
 	select {
 	case f := <-ch:
 		return f, nil
 	case <-ctx.Done():
-		r.cancelCapture(ch)
+		r.captures.cancel(ch)
 		return nil, ErrLoopStalled
 	}
 }
 
 // HasFinalPass reports whether the game draws its own final screen, which is
 // what makes the two stages different images.
-func (r *Runtime) HasFinalPass() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	return r.hasFinal
-}
+func (r *Runtime) HasFinalPass() bool { return r.captures.finalPass() }
 
 // DefaultStage is the stage Capture uses when nobody asks for one.
-func (r *Runtime) DefaultStage() Stage {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	return r.defaultStage
-}
-
-func (r *Runtime) cancelCapture(ch chan *Frame) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for i, c := range r.captures {
-		if c.ch == ch {
-			r.captures = append(r.captures[:i], r.captures[i+1:]...)
-			return
-		}
-	}
-}
+func (r *Runtime) DefaultStage() Stage { return r.captures.defaultStage() }
 
 // LastFrame is the most recently captured frame, or nil if nothing has been
 // captured yet. Note that this is the last frame somebody asked for, not the
 // last frame drawn: nothing is captured behind the caller's back.
-func (r *Runtime) LastFrame() *Frame {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	return r.lastFrame
-}
+func (r *Runtime) LastFrame() *Frame { return r.captures.lastFrame() }
 
 // captureRequest is one waiter and the stage it asked for.
 type captureRequest struct {
 	ch    chan *Frame
 	stage Stage
+}
+
+// captures is everyone waiting for a frame, and what the game can give them.
+//
+// Its own type with its own lock, because none of it is loop state: whether
+// somebody is waiting for a picture has nothing to do with whether the game is
+// paused, and holding the runtime's mutex to answer that put the capture queue
+// on the same lock as the tick counter, the command queue and every lazily
+// created handle. What it does need from the loop — is the game frozen, is the
+// buffer on — is passed in, which also makes the dependency visible instead of
+// implied.
+type captures struct {
+	mu sync.Mutex
+
+	waiting []captureRequest
+	last    *Frame
+
+	// stage is what a request without one asks for; hasFinal says whether the
+	// two stages are different images at all. Both fixed before the loop starts.
+	stage    Stage
+	hasFinal bool
+}
+
+func (c *captures) add(req captureRequest) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.waiting = append(c.waiting, req)
+}
+
+func (c *captures) cancel(ch chan *Frame) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for i, req := range c.waiting {
+		if req.ch == ch {
+			c.waiting = append(c.waiting[:i], c.waiting[i+1:]...)
+			return
+		}
+	}
+}
+
+func (c *captures) pending() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.waiting)
+}
+
+// take empties the queue and sorts it by the stage each caller asked for.
+func (c *captures) take() (offscreen, final []chan *Frame) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	waiting := c.waiting
+	c.waiting = nil
+
+	for _, req := range waiting {
+		// With no final pass of its own the game's offscreen is what the player
+		// sees, give or take Ebitengine's scaling, so both stages are the same
+		// image and there is nothing to read twice.
+		if req.stage == StageFinal && c.hasFinal {
+			final = append(final, req.ch)
+			continue
+		}
+		offscreen = append(offscreen, req.ch)
+	}
+	return offscreen, final
+}
+
+func (c *captures) remember(frame *Frame) {
+	if frame == nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.last = frame
+}
+
+func (c *captures) lastFrame() *Frame {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.last
+}
+
+func (c *captures) defaultStage() Stage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.stage
+}
+
+func (c *captures) finalPass() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.hasFinal
 }
 
 // capturePlan is what this frame owes, decided once before anything is drawn.
@@ -156,14 +227,13 @@ func (p *capturePlan) demoteToOffscreen() {
 // every frame, and unlike beginCapture it must not consume anything, because
 // the frame it is asked about has not been drawn yet.
 func (r *Runtime) captureWanted() bool {
-	r.mu.Lock()
-	waiting := len(r.captures)
-	ring := r.ring
-	r.mu.Unlock()
-
-	if waiting > 0 {
+	if r.captures.pending() > 0 {
 		return true
 	}
+
+	r.mu.Lock()
+	ring := r.ring
+	r.mu.Unlock()
 
 	// The buffer being on is not enough. With `every: 60` it keeps one frame in
 	// sixty, and forcing the final pass on the other fifty-nine turns off the
@@ -179,8 +249,6 @@ func (r *Runtime) captureWanted() bool {
 // it must be called exactly once per drawn frame.
 func (r *Runtime) beginCapture() capturePlan {
 	r.mu.Lock()
-	waiting := r.captures
-	r.captures = nil
 	ring := r.ring
 	hasFinal := r.hasFinal
 	// A crashed game keeps drawing — the wrapper paints the last frame and the
@@ -191,17 +259,7 @@ func (r *Runtime) beginCapture() capturePlan {
 	r.mu.Unlock()
 
 	var plan capturePlan
-
-	for _, req := range waiting {
-		// With no final pass of its own the game's offscreen is what the player
-		// sees, give or take Ebitengine's scaling, so both stages are the same
-		// image and there is nothing to read twice.
-		if req.stage == StageFinal && hasFinal {
-			plan.final = append(plan.final, req.ch)
-			continue
-		}
-		plan.offscreen = append(plan.offscreen, req.ch)
-	}
+	plan.offscreen, plan.final = r.captures.take()
 
 	if ring != nil && !frozen && ring.wants() {
 		plan.ring, plan.buffer = ring.Stage(), ring
@@ -238,16 +296,11 @@ func (r *Runtime) finishCapture(plan capturePlan, offscreen, final *ebiten.Image
 
 	// The offscreen is preferred for lastFrame because that is what redraws the
 	// screen after a crash, and it is the only one whose size matches it.
-	last := offFrame
-	if last == nil {
-		last = finalFrame
+	if offFrame != nil {
+		r.captures.remember(offFrame)
+	} else {
+		r.captures.remember(finalFrame)
 	}
-
-	r.mu.Lock()
-	if last != nil {
-		r.lastFrame = last
-	}
-	r.mu.Unlock()
 
 	if plan.buffer == nil {
 		return
@@ -282,11 +335,7 @@ func (r *Runtime) Ring() *frameRing {
 // worth its cost when the game has just crashed and this is the last image that
 // will ever exist of it.
 func (r *Runtime) keepFrame(screen *ebiten.Image) {
-	frame := readFrame(screen, r.Tick(), StageOffscreen)
-
-	r.mu.Lock()
-	r.lastFrame = frame
-	r.mu.Unlock()
+	r.captures.remember(readFrame(screen, r.Tick(), StageOffscreen))
 }
 
 func readFrame(screen *ebiten.Image, tick int64, stage Stage) *Frame {
