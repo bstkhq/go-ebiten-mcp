@@ -884,9 +884,8 @@ func splitContent(t *testing.T, result *mcpsdk.CallToolResult) (*mcpsdk.ImageCon
 // newTestSession is a client and a server joined by a pipe, which is as close
 // to a real one as this gets without a socket.
 //
-// Worth having its own session rather than one per call: s.mcp() builds a fresh
-// server and registers all twenty-three tools every time it is called, so a
-// test that walks the whole set would otherwise pay for that walk twice over.
+// A session of its own rather than one per call, so that a test walking the
+// whole set of tools opens one connection instead of twenty-three.
 func newTestSession(t *testing.T, ctx context.Context, s *Server) *mcpsdk.ClientSession {
 	t.Helper()
 

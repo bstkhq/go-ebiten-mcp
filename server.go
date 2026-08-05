@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
@@ -31,6 +32,10 @@ type Server struct {
 	addr string
 	ln   net.Listener
 	http *http.Server
+
+	// The MCP server, built once. See mcp.
+	once sync.Once
+	srv  *mcpsdk.Server
 }
 
 // Serve starts the MCP server for a wrapped game.
@@ -141,8 +146,25 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"http://"+s.addr, Path, "http://"+s.addr)
 }
 
-// mcp assembles the MCP server and registers every tool.
+// mcp is the MCP server, assembled and registered on the first ask and shared
+// from then on.
+//
+// Shared because registering a tool derives a JSON schema from the Go type its
+// handler returns, and there are twenty-three of them. This used to run per
+// HTTP request — the handler below was handed a function that built a whole new
+// server every time one arrived — which cost about 1.6 MB a call and did not
+// come back: after fifteen calls the game's heap had grown by 24 MB, and a
+// third of it was schema derivation. An agent session is hundreds of calls.
+//
+// One server is what the SDK expects here; its own documentation says it is
+// fine for the lookup to return the same one every time. A server serves as
+// many sessions as connect to it, and nothing about a session changes the tools.
 func (s *Server) mcp() *mcpsdk.Server {
+	s.once.Do(func() { s.srv = s.buildMCP() })
+	return s.srv
+}
+
+func (s *Server) buildMCP() *mcpsdk.Server {
 	srv := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:        "go-ebiten-mcp",
 		Title:       "Ebitengine game: " + s.opts.Name,
