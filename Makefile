@@ -66,3 +66,4 @@ x-stop:
 .PHONY: clean
 clean:
 	rm -rf .bin
+	rm -f ebitenmcp ebitenmcp.exe

@@ -7,3 +7,10 @@
 game_*-[0-9].png
 game_*-[0-9].gif
 game_*-[0-9].mp4
+
+# The binaries `go build ./...` drops in the working directory, which is how
+# 26 MB of them — a Mach-O and a PE32+, from checking that this cross-compiles —
+# ended up in the history and had to be filtered back out. Anchored to the root
+# so that the cmd/ebitenmcp directory is still tracked.
+/ebitenmcp
+/ebitenmcp.exe
