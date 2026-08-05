@@ -83,18 +83,18 @@ func (s *Server) gamepad(ctx context.Context, _ *mcpsdk.CallToolRequest, in game
 	var out InputOutput
 
 	if in.Connect != nil {
-		profile, err := in.Connect.profile()
+		identity, err := in.Connect.identity()
 		if err != nil {
 			return nil, InputOutput{}, err
 		}
 
-		id, err := pads.Connect(ctx, profile)
+		id, err := pads.Connect(ctx, identity)
 		if err != nil {
 			return nil, InputOutput{}, err
 		}
 
 		out.Connected = intPtr(int(id))
-		out.SDLID = profile.SDLID()
+		out.SDLID = identity.SDLID()
 		in.ID = intPtr(int(id))
 	}
 
@@ -130,7 +130,7 @@ func (s *Server) applyGamepad(pads *Gamepads, id ebiten.GamepadID, in gamepadInp
 		return nil
 	}
 
-	profile, err := pads.Profile(id)
+	profile, err := pads.layout(id)
 	if err != nil {
 		return err
 	}
@@ -184,7 +184,7 @@ func (s *Server) applyGamepad(pads *Gamepads, id ebiten.GamepadID, in gamepadInp
 //
 // A trigger runs 0..255 and a stick -32767..32767, so a caller asking for "all
 // the way" cannot mean a number: it has to mean a proportion.
-func scaleAxis(profile GamepadProfile, code uint16, value float64) int32 {
+func scaleAxis(profile uinput.Profile, code uint16, value float64) int32 {
 	value = clampAxis(value)
 
 	for _, axis := range profile.Axes {
@@ -234,37 +234,35 @@ func (s *Server) gamepadID(pads *Gamepads, requested *int) (ebiten.GamepadID, er
 	}
 }
 
-// profile turns the request into a device description, filling in the default
-// Xbox 360 identity for anything not given.
-func (p *gamepadProfileInput) profile() (GamepadProfile, error) {
-	profile := DefaultGamepadProfile()
-
-	if p.Name != "" {
-		profile.Name = p.Name
-	}
+// identity turns the request into what the controller will claim to be. A field
+// left out keeps the Xbox 360 pad's own, which is what GamepadIdentity's zero
+// value already means.
+func (p *gamepadProfileInput) identity() (GamepadIdentity, error) {
+	var identity GamepadIdentity
+	identity.Name = p.Name
 
 	for _, field := range []struct {
 		name  string
 		value string
 		into  *uint16
 	}{
-		{"vendor", p.Vendor, &profile.Vendor},
-		{"product", p.Product, &profile.Product},
-		{"version", p.Version, &profile.Version},
-		{"bus", p.Bus, &profile.Bus},
+		{"vendor", p.Vendor, &identity.Vendor},
+		{"product", p.Product, &identity.Product},
+		{"version", p.Version, &identity.Version},
+		{"bus", p.Bus, &identity.Bus},
 	} {
 		if field.value == "" {
 			continue
 		}
 		n, err := strconv.ParseUint(field.value, 0, 16)
 		if err != nil {
-			return profile, fmt.Errorf("%s %q is not a number; write it as 0x045e or 1118",
+			return identity, fmt.Errorf("%s %q is not a number; write it as 0x045e or 1118",
 				field.name, field.value)
 		}
 		*field.into = uint16(n)
 	}
 
-	return profile, nil
+	return identity, nil
 }
 
 func parseCode(s string) (uint16, error) {

@@ -21,7 +21,7 @@ func requireGamepads(t *testing.T) {
 	}
 }
 
-func connect(t *testing.T, profile GamepadProfile) (*Gamepads, ebiten.GamepadID) {
+func connect(t *testing.T, identity GamepadIdentity) (*Gamepads, ebiten.GamepadID) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -29,7 +29,7 @@ func connect(t *testing.T, profile GamepadProfile) (*Gamepads, ebiten.GamepadID)
 
 	pads := testRT.Gamepads()
 
-	id, err := pads.Connect(ctx, profile)
+	id, err := pads.Connect(ctx, identity)
 	if err != nil {
 		t.Fatalf("connecting a gamepad: %v", err)
 	}
@@ -44,10 +44,10 @@ func TestGamepadIsSeenByTheGame(t *testing.T) {
 	requireGamepads(t)
 	reset(t)
 
-	profile := DefaultGamepadProfile()
-	profile.Name = "ebitenmcp default pad"
+	identity := DefaultGamepadIdentity()
+	identity.Name = "ebitenmcp default pad"
 
-	_, id := connect(t, profile)
+	_, id := connect(t, identity)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -64,18 +64,18 @@ func TestGamepadIsSeenByTheGame(t *testing.T) {
 		t.Fatalf("reading the gamepad: %v", err)
 	}
 
-	// Not profile.Name. Ebitengine's Gamepad.Name prefers the controller
-	// database's name whenever the SDL id has an entry there, so a profile that
-	// claims to be a known controller cannot also choose what it is called —
-	// the database wins, and it calls this one "Xbox 360 Controller". A profile
-	// with an id nothing knows keeps its own name, which the custom-identity
-	// test below covers.
+	// Not identity.Name. Ebitengine's Gamepad.Name prefers the controller
+	// database's name whenever the SDL id has an entry there, so an identity
+	// that claims to be a known controller cannot also choose what it is called
+	// — the database wins, and it calls this one "Xbox 360 Controller". An
+	// identity nothing knows keeps its own name, which the custom-identity test
+	// below covers.
 	if name == "" {
 		t.Error("the game reports no name at all")
 	}
-	t.Logf("the game calls it %q; the profile asked for %q", name, profile.Name)
-	if sdlID != profile.SDLID() {
-		t.Errorf("the game sees id %s, want %s", sdlID, profile.SDLID())
+	t.Logf("the game calls it %q; the identity asked for %q", name, identity.Name)
+	if sdlID != identity.SDLID() {
+		t.Errorf("the game sees id %s, want %s", sdlID, identity.SDLID())
 	}
 	// This is what makes the default profile worth having: an id the controller
 	// database knows gets the standard layout for free.
@@ -92,7 +92,7 @@ func TestGamepadButtonsReachTheGame(t *testing.T) {
 	reset(t)
 
 	game := reset(t)
-	pads, id := connect(t, DefaultGamepadProfile())
+	pads, id := connect(t, DefaultGamepadIdentity())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -150,7 +150,7 @@ func TestGamepadAxesReachTheGame(t *testing.T) {
 	requireGamepads(t)
 	reset(t)
 
-	pads, id := connect(t, DefaultGamepadProfile())
+	pads, id := connect(t, DefaultGamepadIdentity())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -182,13 +182,14 @@ func TestGamepadIdentityIsConfigurable(t *testing.T) {
 	requireGamepads(t)
 	reset(t)
 
-	profile := DefaultGamepadProfile()
-	profile.Name = "Advanced Gamepad"
-	profile.Vendor = 0x2a
-	profile.Product = 0x01
-	profile.Version = 0x01
+	identity := GamepadIdentity{
+		Name:    "Advanced Gamepad",
+		Vendor:  0x2a,
+		Product: 0x01,
+		Version: 0x01,
+	}
 
-	_, id := connect(t, profile)
+	_, id := connect(t, identity)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -213,7 +214,7 @@ func TestDisconnectRemovesIt(t *testing.T) {
 	requireGamepads(t)
 	reset(t)
 
-	pads, id := connect(t, DefaultGamepadProfile())
+	pads, id := connect(t, DefaultGamepadIdentity())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

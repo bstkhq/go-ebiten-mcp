@@ -18,7 +18,10 @@ import (
 // caller cannot be asking for a number; it has to be a proportion, and the two
 // shapes do not scale the same way.
 func TestScaleAxisKnowsATriggerFromAStick(t *testing.T) {
-	profile := DefaultGamepadProfile()
+	// The layout rather than the identity: the arithmetic works on the ranges
+	// each axis declares, and an identity carries none, since no caller picks
+	// them.
+	profile := DefaultGamepadIdentity().layout()
 
 	for _, c := range []struct {
 		name  string
@@ -54,7 +57,7 @@ func TestScaleAxisKnowsATriggerFromAStick(t *testing.T) {
 // scale into, so the value goes as it came rather than being scaled by a range
 // belonging to some other axis.
 func TestScaleAxisPassesThroughAnAxisTheProfileNeverDeclared(t *testing.T) {
-	if got := scaleAxis(DefaultGamepadProfile(), 0xbeef, 1); got != 1 {
+	if got := scaleAxis(DefaultGamepadIdentity().layout(), 0xbeef, 1); got != 1 {
 		t.Errorf("an undeclared axis scaled to %d, want the value itself", got)
 	}
 }

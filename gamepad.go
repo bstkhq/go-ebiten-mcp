@@ -33,12 +33,64 @@ type Gamepads struct {
 	devices map[ebiten.GamepadID]*uinput.Device
 }
 
-// GamepadProfile describes the controller to pretend to be.
-type GamepadProfile = uinput.Profile
+// GamepadIdentity is what a virtual controller claims to be.
+//
+// The layout is deliberately not part of it. Every virtual pad has an Xbox 360
+// controller's buttons and axes, because Ebitengine's controller database has a
+// complete standard mapping for that layout — so a game asking for the standard
+// buttons gets them. A pad with a layout nothing has a mapping for would answer
+// no to IsStandardGamepadLayoutAvailable, which is the first thing most games
+// check, and would prove nothing about the game's real handling.
+//
+// What a game does switch on is the vendor and the product, and that is worth
+// choosing: a controller that could only ever claim to be an Xbox pad would
+// send those games down a different path than their own hardware.
+//
+// A zero field means the Xbox 360 pad's own, so setting only Vendor is a
+// sensible thing to do.
+type GamepadIdentity struct {
+	Name    string
+	Bus     uint16
+	Vendor  uint16
+	Product uint16
+	Version uint16
+}
 
-// DefaultGamepadProfile is an Xbox 360 pad, which Ebitengine's controller
-// database has a complete standard-layout mapping for.
-func DefaultGamepadProfile() GamepadProfile { return uinput.Xbox360() }
+// DefaultGamepadIdentity is the Xbox 360 pad, spelled out for a caller who
+// wants to see what the zero value means.
+func DefaultGamepadIdentity() GamepadIdentity {
+	p := uinput.Xbox360()
+	return GamepadIdentity{
+		Name: p.Name, Bus: p.Bus, Vendor: p.Vendor, Product: p.Product, Version: p.Version,
+	}
+}
+
+// SDLID is the identifier Ebitengine builds from the four numbers, and the one
+// a game matches on.
+func (i GamepadIdentity) SDLID() string { return i.layout().SDLID() }
+
+// layout is the identity with the Xbox 360 buttons and axes around it, which is
+// the only shape a device is ever created with.
+func (i GamepadIdentity) layout() uinput.Profile {
+	p := uinput.Xbox360()
+
+	if i.Name != "" {
+		p.Name = i.Name
+	}
+	if i.Bus != 0 {
+		p.Bus = i.Bus
+	}
+	if i.Vendor != 0 {
+		p.Vendor = i.Vendor
+	}
+	if i.Product != 0 {
+		p.Product = i.Product
+	}
+	if i.Version != 0 {
+		p.Version = i.Version
+	}
+	return p
+}
 
 // Gamepads returns the handle for virtual controllers.
 func (r *Runtime) Gamepads() *Gamepads {
@@ -61,7 +113,7 @@ func GamepadsAvailable() error { return uinput.Available() }
 // Ebitengine only picks it up while polling inside its own loop, so returning
 // any earlier would hand back an id for a controller nothing can see yet — and
 // the first button press would land nowhere with no error to explain it.
-func (g *Gamepads) Connect(ctx context.Context, profile GamepadProfile) (ebiten.GamepadID, error) {
+func (g *Gamepads) Connect(ctx context.Context, identity GamepadIdentity) (ebiten.GamepadID, error) {
 	// One at a time, end to end. Connect works out which id is new by comparing
 	// the list before with the list after, so two of them running together both
 	// see the same gap, both claim the same id, and the second overwrites the
@@ -75,12 +127,12 @@ func (g *Gamepads) Connect(ctx context.Context, profile GamepadProfile) (ebiten.
 		return 0, err
 	}
 
-	device, err := uinput.Create(profile)
+	device, err := uinput.Create(identity.layout())
 	if err != nil {
 		return 0, err
 	}
 
-	id, err := g.waitForNew(ctx, before, profile)
+	id, err := g.waitForNew(ctx, before, identity)
 	if err != nil {
 		device.Close()
 		return 0, err
@@ -95,7 +147,7 @@ func (g *Gamepads) Connect(ctx context.Context, profile GamepadProfile) (ebiten.
 
 // waitForNew watches for an id that was not there before and that claims to be
 // the controller just created.
-func (g *Gamepads) waitForNew(ctx context.Context, before map[ebiten.GamepadID]bool, profile GamepadProfile) (ebiten.GamepadID, error) {
+func (g *Gamepads) waitForNew(ctx context.Context, before map[ebiten.GamepadID]bool, identity GamepadIdentity) (ebiten.GamepadID, error) {
 	deadline := time.Now().Add(10 * time.Second)
 
 	for time.Now().Before(deadline) {
@@ -110,7 +162,7 @@ func (g *Gamepads) waitForNew(ctx context.Context, before map[ebiten.GamepadID]b
 			}
 			// More than one controller can appear at once on a busy machine,
 			// so check it is ours rather than taking whatever is new.
-			if ebiten.GamepadSDLID(id) == profile.SDLID() {
+			if ebiten.GamepadSDLID(id) == identity.SDLID() {
 				return id, nil
 			}
 		}
@@ -122,7 +174,7 @@ func (g *Gamepads) waitForNew(ctx context.Context, before map[ebiten.GamepadID]b
 
 	return 0, fmt.Errorf("the game never saw the controller. It was created, so this is "+
 		"usually permissions: check that /dev/input/event* is readable, which is normally "+
-		"group input. Its id would have been %s", profile.SDLID())
+		"group input. Its id would have been %s", identity.SDLID())
 }
 
 // visible asks the game which controllers it can see, from inside the loop,
@@ -198,9 +250,18 @@ func (g *Gamepads) Apply(id ebiten.GamepadID, buttons map[uint16]bool, axes map[
 	})
 }
 
-// Profile returns what a connected controller claims to be.
-func (g *Gamepads) Profile(id ebiten.GamepadID) (GamepadProfile, error) {
-	var profile GamepadProfile
+// Identity returns what a connected controller claims to be.
+func (g *Gamepads) Identity(id ebiten.GamepadID) (GamepadIdentity, error) {
+	p, err := g.layout(id)
+	return GamepadIdentity{
+		Name: p.Name, Bus: p.Bus, Vendor: p.Vendor, Product: p.Product, Version: p.Version,
+	}, err
+}
+
+// layout is the whole device description, buttons and axes included, which only
+// the axis arithmetic needs and which no caller can build one of.
+func (g *Gamepads) layout(id ebiten.GamepadID) (uinput.Profile, error) {
+	var profile uinput.Profile
 
 	err := g.withDevice(id, func(device *uinput.Device) error {
 		profile = device.Profile()
