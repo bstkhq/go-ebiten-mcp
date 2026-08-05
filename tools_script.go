@@ -3,7 +3,6 @@ package ebitenmcp
 import (
 	"context"
 	"fmt"
-	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -52,6 +51,7 @@ type mouseStep struct {
 type scriptInput struct {
 	Steps   []scriptStep `json:"steps" jsonschema:"the sequence, in any order; they are run by tick"`
 	Columns int          `json:"columns,omitempty" jsonschema:"columns in the returned contact sheet; defaults to 4"`
+	MaxSize int          `json:"max_size,omitempty" jsonschema:"longest side of the inline contact sheet in pixels; defaults to 1024"`
 }
 
 func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scriptInput) (*mcpsdk.CallToolResult, any, error) {
@@ -68,9 +68,9 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 	steps := sortedSteps(in.Steps)
 	last := steps[len(steps)-1].At
 
-	// The budget covers the whole sequence, with room for a game running slower
-	// than sixty ticks a second, which under a software renderer it will be.
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(last+10)*200*time.Millisecond+defaultToolTimeout)
+	// The budget covers the whole sequence, doubled because a step can wait on
+	// ticks of its own on top of the ones it is anchored to.
+	ctx, cancel := tickBudget(ctx, 2*(last+10))
 	defer cancel()
 
 	start := s.rt.Tick()
@@ -130,18 +130,14 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 	}
 	out["contact_sheet"] = art
 
-	data, err := encodePNG(fitInline(sheet, inlineMaxSize))
+	note := fmt.Sprintf("%d steps over %d ticks, %d frames captured",
+		len(steps), s.rt.Tick()-start, len(frames))
+
+	result, _, err := imageResult(sheet, art, note, in.MaxSize, false)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	return &mcpsdk.CallToolResult{
-		Content: []mcpsdk.Content{
-			&mcpsdk.ImageContent{Data: data, MIMEType: "image/png"},
-			&mcpsdk.TextContent{Text: fmt.Sprintf("%d steps over %d ticks, %d frames captured\n%s",
-				len(steps), s.rt.Tick()-start, len(frames), art.Path)},
-		},
-	}, out, nil
+	return result, out, nil
 }
 
 // runStep performs one step and returns the frame if it asked for one.
@@ -187,9 +183,7 @@ func (s *Server) runStep(ctx context.Context, step scriptStep) (*Frame, error) {
 	}
 
 	if step.Touches != nil {
-		if err := s.applyTouches(step.Touches); err != nil {
-			return nil, err
-		}
+		s.applyTouches(step.Touches)
 		if err := s.rt.WaitTicks(ctx, 1); err != nil {
 			return nil, err
 		}
@@ -232,13 +226,9 @@ func (s *Server) runMouseStep(ctx context.Context, m *mouseStep) error {
 		return nil
 	}
 
-	inj.MouseDown(button)
-	if err := s.rt.WaitTicks(ctx, 1); err != nil {
-		inj.MouseUp(button)
+	if err := s.click(ctx, button); err != nil {
 		return err
 	}
-	inj.MouseUp(button)
-
 	return s.rt.WaitTicks(ctx, 1)
 }
 

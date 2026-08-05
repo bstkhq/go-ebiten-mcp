@@ -24,6 +24,10 @@ func (s *Server) addProfileTools(srv *mcpsdk.Server) {
 	}, s.profile)
 }
 
+// maxProfileSeconds is long enough to catch anything periodic and short enough
+// that a mistyped number is an error rather than an outage.
+const maxProfileSeconds = 120
+
 type profileInput struct {
 	Kind    string `json:"kind,omitempty" jsonschema:"cpu for where the time goes, heap for what is holding memory now, allocs for what has been allocating, goroutine for what everything is blocked on; defaults to cpu"`
 	Seconds int    `json:"seconds,omitempty" jsonschema:"how long to sample for a cpu profile; defaults to 5"`
@@ -38,9 +42,20 @@ func (s *Server) profile(ctx context.Context, _ *mcpsdk.CallToolRequest, in prof
 	if in.Seconds <= 0 {
 		in.Seconds = 5
 	}
+	// Capped, because a cpu profile holds the process-global profiler for its
+	// whole duration: one that ran for a day would block this handler and make
+	// every later game_profile fail with "only one can run at a time".
+	if in.Seconds > maxProfileSeconds {
+		return nil, nil, fmt.Errorf("a %ds profile would hold the profiler that long and block "+
+			"every other one; the limit is %ds", in.Seconds, maxProfileSeconds)
+	}
 	if in.Lines <= 0 {
 		in.Lines = 25
 	}
+
+	// The budget covers the sampling plus the toolchain run that summarises it.
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(in.Seconds)*time.Second+2*time.Minute)
+	defer cancel()
 
 	data, err := s.collectProfile(ctx, in)
 	if err != nil {
@@ -60,7 +75,7 @@ func (s *Server) profile(ctx context.Context, _ *mcpsdk.CallToolRequest, in prof
 
 	// The summary is the point. A pprof file is an artifact for a person with
 	// the right tool; twenty lines naming the functions is an answer.
-	summary, err := summariseProfile(art.Path, in)
+	summary, err := summariseProfile(ctx, art.Path, in)
 	if err != nil {
 		out["note"] = "could not summarise it: " + err.Error() +
 			". The file is still there: open it with `go tool pprof " + art.Path + "`"
@@ -116,7 +131,7 @@ func (s *Server) collectProfile(ctx context.Context, in profileInput) ([]byte, e
 //
 // It needs the binary as well as the profile, since a pprof file carries
 // addresses rather than names.
-func summariseProfile(path string, in profileInput) (string, error) {
+func summariseProfile(ctx context.Context, path string, in profileInput) (string, error) {
 	if _, err := exec.LookPath("go"); err != nil {
 		return "", fmt.Errorf("no Go toolchain here to read it with")
 	}
@@ -131,7 +146,9 @@ func summariseProfile(path string, in profileInput) (string, error) {
 		mode = "-traces"
 	}
 
-	cmd := exec.Command("go", "tool", "pprof", mode, "-nodecount", fmt.Sprint(in.Lines),
+	// Under the context: `go tool pprof` can fetch modules, and a handler that
+	// waited for that would be waiting on somebody's network.
+	cmd := exec.CommandContext(ctx, "go", "tool", "pprof", mode, "-nodecount", fmt.Sprint(in.Lines),
 		binary, path)
 
 	var stderr bytes.Buffer

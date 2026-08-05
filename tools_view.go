@@ -24,6 +24,28 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, defaultToolTimeout)
 }
 
+// slowTick is what one tick is assumed to cost at worst.
+//
+// Far more than the 16ms of sixty a second, because the machines this runs on
+// are exactly the ones where that is not true: a software rasteriser, a shared
+// CI box, a game being stepped through. Guessing low turns a slow frame into a
+// reported failure.
+const slowTick = 100 * time.Millisecond
+
+// tickBudget bounds a tool by the work it was asked to do rather than by a flat
+// number.
+//
+// game_step used a flat five seconds while every sibling scaled, so a step of
+// more than about three hundred ticks always timed out — and then reported that
+// the game loop was not running, when it had been stepping exactly as told. One
+// formula in one place is how that stops being possible to get wrong again.
+func tickBudget(ctx context.Context, ticks int) (context.Context, context.CancelFunc) {
+	if ticks < 0 {
+		ticks = 0
+	}
+	return context.WithTimeout(ctx, time.Duration(ticks)*slowTick+defaultToolTimeout)
+}
+
 func (s *Server) addViewTools(srv *mcpsdk.Server) {
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name: "game_screenshot",
@@ -52,9 +74,14 @@ func (s *Server) addViewTools(srv *mcpsdk.Server) {
 // game_screenshot
 // ---------------------------------------------------------------------------
 
-// stageDoc is shared by every tool that captures, because the choice is the
-// same one everywhere and describing it three different ways would suggest it
-// was three different things.
+// stageDoc describes the stage argument, once.
+//
+// It is a Go constant and not a jsonschema tag because a tag has to be a
+// literal, so four tools had this paragraph copied into them — with one of the
+// copies stating the opposite default, and a comment above them claiming it was
+// written once. The tags now say `jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"` and the text is attached
+// to the schema after the fact, in stageSchema, which is the only way to have
+// one copy of it.
 const stageDoc = "which drawing step to read: 'final' for what the player sees, " +
 	"'offscreen' for what the game's own Draw produced before its DrawFinalScreen " +
 	"ran. Only differs for a game that draws its own final screen — where asking " +
@@ -114,24 +141,7 @@ func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool
 		return nil, nil, err
 	}
 
-	var inline image.Image = frame.Image
-	if !full {
-		if maxSize <= 0 {
-			maxSize = inlineMaxSize
-		}
-		inline = fitInline(frame.Image, maxSize)
-	}
-
-	data, err := encodePNG(inline)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	b := inline.Bounds()
 	text := fmt.Sprintf("tick %d, %dx%d native", frame.Tick, art.Width, art.Height)
-	if b.Dx() != art.Width {
-		text += fmt.Sprintf(", shown at %dx%d", b.Dx(), b.Dy())
-	}
 	// Only worth saying when the two stages are actually different images.
 	// Naming a distinction that does not exist for this game would invite
 	// somebody to go looking for it.
@@ -141,26 +151,63 @@ func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool
 	if note != "" {
 		text += "\n" + note
 	}
-	text += "\n" + art.Path
 
-	out := map[string]any{
+	result, shown, err := imageResult(frame.Image, art, text, maxSize, full)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return result, map[string]any{
 		"tick":     frame.Tick,
 		"stage":    string(frame.Stage),
 		"artifact": art,
-		"inline":   map[string]int{"width": b.Dx(), "height": b.Dy()},
+		"inline":   map[string]int{"width": shown.Dx(), "height": shown.Dy()},
+	}, nil
+}
+
+// imageResult is the shape every tool that returns a picture returns: the image
+// inline for the conversation, and the path of the full-resolution file for a
+// person.
+//
+// It was written out four times over, and the cost of that was not tidiness: the
+// only copy that honoured max_size and full_quality was the one in
+// game_screenshot, so those two arguments quietly did nothing on the four tools
+// that return the *bigger* images. Now they work everywhere, because there is
+// one place for them to work.
+func imageResult(img image.Image, art *Artifact, note string, maxSize int, full bool) (*mcpsdk.CallToolResult, image.Rectangle, error) {
+	var inline image.Image = img
+	if !full {
+		if maxSize <= 0 {
+			maxSize = inlineMaxSize
+		}
+		inline = fitInline(img, maxSize)
+	}
+
+	data, err := encodePNG(inline)
+	if err != nil {
+		return nil, image.Rectangle{}, err
+	}
+
+	shown := inline.Bounds()
+	if shown.Dx() != art.Width {
+		note += fmt.Sprintf("\nshown at %dx%d of %dx%d", shown.Dx(), shown.Dy(), art.Width, art.Height)
 	}
 
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{
 			&mcpsdk.ImageContent{Data: data, MIMEType: "image/png"},
-			&mcpsdk.TextContent{Text: text},
+			&mcpsdk.TextContent{Text: note + "\n" + art.Path},
 		},
-	}, out, nil
+	}, shown, nil
 }
 
 // ---------------------------------------------------------------------------
 // game_record
 // ---------------------------------------------------------------------------
+
+// maxRecordFrames is about a minute at sixty a second, and at 720p about 2 GB
+// if every one were kept — which is why `every` exists.
+const maxRecordFrames = 3600
 
 type recordInput struct {
 	Frames  int    `json:"frames,omitempty" jsonschema:"how many drawn frames to record; defaults to 60. Note that a frame is one Draw, which without vsync can happen several times per tick"`
@@ -170,7 +217,10 @@ type recordInput struct {
 	Format  string `json:"format,omitempty" jsonschema:"mp4 for something to watch, gif for something that plays inline in a README or an issue; defaults to mp4"`
 	Inline  string `json:"inline,omitempty" jsonschema:"what to return in the reply: 'sheet' for a grid of frames with their ticks, or 'gif' for the animation itself, which some clients play and some show as a single frame; defaults to sheet"`
 	NoVideo bool   `json:"no_video,omitempty" jsonschema:"skip writing the video file and only produce the contact sheet"`
-	Stage   string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
+	MaxSize int    `json:"max_size,omitempty" jsonschema:"longest side of the inline contact sheet in pixels; defaults to 1024. The file on disk is always full resolution"`
+
+	FullQuality bool   `json:"full_quality,omitempty" jsonschema:"return the inline contact sheet at native resolution, however large that is"`
+	Stage       string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
 func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recordInput) (*mcpsdk.CallToolResult, any, error) {
@@ -178,45 +228,18 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 	if err != nil {
 		return nil, nil, err
 	}
-
-	if in.Frames <= 0 {
-		in.Frames = 60
-	}
-	if in.Every <= 0 {
-		in.Every = 1
-	}
-	if in.Columns <= 0 {
-		in.Columns = 4
-	}
-	if in.Cells <= 0 {
-		in.Cells = 12
-	}
-	if in.Inline == "gif" && in.Format == "" {
-		in.Format = "gif"
+	if err := in.fill(); err != nil {
+		return nil, nil, err
 	}
 
 	// Recording is the one thing that legitimately takes a while, so the budget
 	// follows the request instead of the default.
-	budget := time.Duration(in.Frames)*100*time.Millisecond + defaultToolTimeout
-	ctx, cancel := context.WithTimeout(ctx, budget)
+	ctx, cancel := tickBudget(ctx, in.Frames)
 	defer cancel()
 
-	frames := make([]*Frame, 0, in.Frames/in.Every+1)
-	for i := 0; i < in.Frames; i++ {
-		frame, err := s.rt.CaptureStage(ctx, stage)
-		if err != nil {
-			if len(frames) == 0 {
-				return nil, nil, s.stalled(err)
-			}
-			break
-		}
-		if i%in.Every == 0 {
-			frames = append(frames, frame)
-		}
-	}
-
-	if len(frames) == 0 {
-		return nil, nil, fmt.Errorf("recorded nothing: the game drew no frames")
+	frames, err := s.recordFrames(ctx, stage, in.Frames, in.Every)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	sheet := contactSheet(pick(frames, in.Cells), in.Columns)
@@ -239,50 +262,123 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 		len(frames), frames[0].Tick, frames[len(frames)-1].Tick)
 
 	if !in.NoVideo {
-		video, err := s.saveVideo(frames, in.Format)
-		if err != nil {
-			note += "\nno video: " + err.Error()
-		} else {
-			out["video"] = video
-			note += "\nvideo: " + video.Path
-			if video.URL != "" {
-				note += "\n" + video.URL
-			}
-		}
+		note += s.attachVideo(ctx, frames, in.Format, out)
 	}
 
-	// The animation itself, for a client that plays it. Where one does, it beats
-	// a grid of stills at showing motion; where one does not, it shows a single
-	// frame and the contact sheet is the better answer — which is why this is a
-	// choice rather than a default.
 	if in.Inline == "gif" {
-		if video, ok := out["video"].(*Artifact); ok && video.Kind == "gif" {
-			data, err := os.ReadFile(video.Path)
-			if err == nil {
-				return &mcpsdk.CallToolResult{
-					Content: []mcpsdk.Content{
-						&mcpsdk.ImageContent{Data: data, MIMEType: "image/gif"},
-						&mcpsdk.TextContent{Text: note + "\n" + sheetArt.Path},
-					},
-				}, out, nil
-			}
-			note += "\ncould not read the gif back: " + err.Error()
-		} else {
-			note += "\nno gif was produced, so the contact sheet is what came back"
+		result, why := inlineGif(out, note, sheetArt)
+		if result != nil {
+			return result, out, nil
 		}
+		note += why
 	}
 
-	data, err := encodePNG(fitInline(sheet, inlineMaxSize))
+	result, _, err := imageResult(sheet, sheetArt, note, in.MaxSize, in.FullQuality)
 	if err != nil {
 		return nil, nil, err
+	}
+	return result, out, nil
+}
+
+// attachVideo writes the video and returns what to add to the note. A failure
+// to encode is a line in the answer rather than a failed call: the frames are
+// the point, and the contact sheet already has them.
+func (s *Server) attachVideo(ctx context.Context, frames []*Frame, format string, out map[string]any) string {
+	video, err := s.saveVideo(ctx, frames, format)
+	if err != nil {
+		return "\nno video: " + err.Error()
+	}
+
+	out["video"] = video
+
+	note := "\nvideo: " + video.Path
+	if video.URL != "" {
+		note += "\n" + video.URL
+	}
+	return note
+}
+
+// inlineGif returns the animation itself for a client that plays it, or nothing
+// and a line saying why not.
+//
+// Where a client does animate one it beats a grid of stills at showing motion;
+// where one does not it shows a single frame, and then the contact sheet is the
+// better answer. Which is why this is asked for rather than assumed.
+func inlineGif(out map[string]any, note string, sheet *Artifact) (*mcpsdk.CallToolResult, string) {
+	video, ok := out["video"].(*Artifact)
+	if !ok || video.Kind != "gif" {
+		return nil, "\nno gif was produced, so the contact sheet is what came back"
+	}
+
+	data, err := os.ReadFile(video.Path)
+	if err != nil {
+		return nil, "\ncould not read the gif back: " + err.Error()
 	}
 
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{
-			&mcpsdk.ImageContent{Data: data, MIMEType: "image/png"},
-			&mcpsdk.TextContent{Text: note + "\n" + sheetArt.Path},
+			&mcpsdk.ImageContent{Data: data, MIMEType: "image/gif"},
+			&mcpsdk.TextContent{Text: note + "\n" + sheet.Path},
 		},
-	}, out, nil
+	}, ""
+}
+
+// fill applies the defaults and refuses the requests that would end the game
+// rather than answer it.
+func (in *recordInput) fill() error {
+	if in.Frames <= 0 {
+		in.Frames = 60
+	}
+	// Capped, because every frame recorded is held in memory at full resolution
+	// until the video is written — 3.5 MB each at 720p — and an agent that
+	// mistook frames for ticks and asked for a hundred thousand would take the
+	// game down with it rather than be told no.
+	if in.Frames > maxRecordFrames {
+		return fmt.Errorf("recording %d frames would hold them all in memory at once; "+
+			"the limit is %d, and `every` covers a longer stretch for the same cost",
+			in.Frames, maxRecordFrames)
+	}
+	if in.Every <= 0 {
+		in.Every = 1
+	}
+	if in.Columns <= 0 {
+		in.Columns = 4
+	}
+	if in.Cells <= 0 {
+		in.Cells = 12
+	}
+	if in.Inline == "gif" && in.Format == "" {
+		in.Format = "gif"
+	}
+	return nil
+}
+
+// recordFrames captures until it has what it was asked for or the loop stops
+// answering.
+//
+// Stopping early with something is deliberate: a recording that ran into a crash
+// halfway is exactly the recording somebody wants, and refusing to return it
+// because it is short would throw away the evidence.
+func (s *Server) recordFrames(ctx context.Context, stage Stage, count, every int) ([]*Frame, error) {
+	frames := make([]*Frame, 0, count/every+1)
+
+	for i := 0; i < count; i++ {
+		frame, err := s.rt.CaptureStage(ctx, stage)
+		if err != nil {
+			if len(frames) == 0 {
+				return nil, s.stalled(err)
+			}
+			break
+		}
+		if i%every == 0 {
+			frames = append(frames, frame)
+		}
+	}
+
+	if len(frames) == 0 {
+		return nil, fmt.Errorf("recorded nothing: the game drew no frames")
+	}
+	return frames, nil
 }
 
 // pick spreads n choices evenly across the recording, so the sheet covers the
@@ -304,8 +400,11 @@ func pick(frames []*Frame, n int) []*Frame {
 // ---------------------------------------------------------------------------
 
 type compareInput struct {
-	WaitTicks int    `json:"wait_ticks,omitempty" jsonschema:"ticks to let pass between the two captures; defaults to 30"`
-	Stage     string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
+	WaitTicks   int  `json:"wait_ticks,omitempty" jsonschema:"ticks to let pass between the two captures; defaults to 30"`
+	MaxSize     int  `json:"max_size,omitempty" jsonschema:"longest side of the inline image in pixels; defaults to 1024"`
+	FullQuality bool `json:"full_quality,omitempty" jsonschema:"return the inline image at native resolution"`
+
+	Stage string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
 func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in compareInput) (*mcpsdk.CallToolResult, any, error) {
@@ -318,7 +417,7 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 		in.WaitTicks = 30
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(in.WaitTicks)*100*time.Millisecond+defaultToolTimeout)
+	ctx, cancel := tickBudget(ctx, in.WaitTicks)
 	defer cancel()
 
 	before, err := s.rt.CaptureStage(ctx, stage)
@@ -342,27 +441,22 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 		return nil, nil, err
 	}
 
-	data, err := encodePNG(fitInline(comparison, inlineMaxSize))
-	if err != nil {
-		return nil, nil, err
-	}
-
 	total := before.Image.Bounds().Dx() * before.Image.Bounds().Dy()
 	note := fmt.Sprintf("tick %d vs %d: %d of %d pixels differ (%.2f%%)",
 		before.Tick, after.Tick, changed, total, 100*float64(changed)/float64(total))
 
-	return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{
-				&mcpsdk.ImageContent{Data: data, MIMEType: "image/png"},
-				&mcpsdk.TextContent{Text: note + "\n" + art.Path},
-			},
-		}, map[string]any{
-			"before_tick":    before.Tick,
-			"after_tick":     after.Tick,
-			"changed_pixels": changed,
-			"total_pixels":   total,
-			"artifact":       art,
-		}, nil
+	result, _, err := imageResult(comparison, art, note, in.MaxSize, in.FullQuality)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return result, map[string]any{
+		"before_tick":    before.Tick,
+		"after_tick":     after.Tick,
+		"changed_pixels": changed,
+		"total_pixels":   total,
+		"artifact":       art,
+	}, nil
 }
 
 // stalled turns a loop timeout into an answer rather than a bare error: which

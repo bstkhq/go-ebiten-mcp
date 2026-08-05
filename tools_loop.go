@@ -72,7 +72,9 @@ func (s *Server) step(ctx context.Context, _ *mcpsdk.CallToolRequest, in stepInp
 		in.Ticks = 1
 	}
 
-	ctx, cancel := withTimeout(ctx)
+	// Budgeted for the ticks asked for, not a flat five seconds: stepping four
+	// hundred ticks is a legitimate request that used to fail on its own success.
+	ctx, cancel := tickBudget(ctx, in.Ticks)
 	defer cancel()
 
 	before := s.rt.Tick()
@@ -120,7 +122,7 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 			in.Ticks = 1
 		}
 
-		ctx, cancel := context.WithTimeout(ctx, time.Duration(in.Ticks)*100*time.Millisecond+defaultToolTimeout)
+		ctx, cancel := tickBudget(ctx, in.Ticks)
 		defer cancel()
 
 		start := time.Now()
@@ -137,7 +139,7 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 		in.Timeout = 600
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(in.Timeout)*100*time.Millisecond+defaultToolTimeout)
+	ctx, cancel := tickBudget(ctx, in.Timeout)
 	defer cancel()
 
 	first, err := s.pathValue(ctx, in.Path)

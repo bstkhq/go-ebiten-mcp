@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/bstkhq/go-ebiten-mcp/internal/hook"
 	"github.com/hajimehoshi/ebiten/v2"
@@ -75,7 +74,7 @@ func (s *Server) requireInput() error {
 // finish applies the shared "and then" behaviour.
 func (s *Server) finish(ctx context.Context, after afterInput, out map[string]any) (*mcpsdk.CallToolResult, any, error) {
 	if after.ThenWaitTicks > 0 {
-		waitCtx, cancel := context.WithTimeout(ctx, time.Duration(after.ThenWaitTicks)*100*time.Millisecond+defaultToolTimeout)
+		waitCtx, cancel := tickBudget(ctx, after.ThenWaitTicks)
 		defer cancel()
 
 		if err := s.rt.WaitTicks(waitCtx, after.ThenWaitTicks); err != nil {
@@ -154,7 +153,7 @@ func (s *Server) key(ctx context.Context, _ *mcpsdk.CallToolRequest, in keyInput
 			inj.KeyDown(k)
 		}
 
-		holdCtx, cancel := context.WithTimeout(ctx, time.Duration(in.Ticks)*100*time.Millisecond+defaultToolTimeout)
+		holdCtx, cancel := tickBudget(ctx, in.Ticks)
 		defer cancel()
 
 		if err := s.rt.WaitTicks(holdCtx, in.Ticks); err != nil {
@@ -282,16 +281,9 @@ func (s *Server) mouse(ctx context.Context, _ *mcpsdk.CallToolRequest, in mouseI
 		out["dragged_to"] = []float64{*in.ToX, *in.ToY}
 
 	case in.Click:
-		inj.MouseDown(button)
-
-		clickCtx, cancel := withTimeout(ctx)
-		defer cancel()
-
-		if err := s.rt.WaitTicks(clickCtx, 1); err != nil {
-			inj.MouseUp(button)
-			return nil, nil, s.stalled(err)
+		if err := s.click(ctx, button); err != nil {
+			return nil, nil, err
 		}
-		inj.MouseUp(button)
 		out["clicked"] = in.Button
 
 	case in.Down:
@@ -311,6 +303,45 @@ func (s *Server) mouse(ctx context.Context, _ *mcpsdk.CallToolRequest, in mouseI
 // Teleporting from one point to the other and clicking would produce a stroke
 // of two points in a paint program and no hover events anywhere else, which is
 // not what a drag looks like to a game.
+// click presses and releases, holding for a tick in between so that a game
+// polling IsMouseButtonPressed cannot miss it between two frames.
+//
+// Shared with game_script, which had its own copy of the same three lines and
+// its own way of putting the button back on failure.
+func (s *Server) click(ctx context.Context, button ebiten.MouseButton) error {
+	inj := s.rt.Injector()
+
+	clickCtx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	inj.MouseDown(button)
+	if err := s.rt.WaitTicks(clickCtx, 1); err != nil {
+		inj.MouseUp(button)
+		return s.stalled(err)
+	}
+	inj.MouseUp(button)
+
+	return nil
+}
+
+// dragPath is the straight line a drag follows, as the points to visit.
+//
+// Split out because the test driver walks the same line and had its own copy of
+// the arithmetic: two implementations of "what does a drag look like" is two
+// things that can disagree about whether the last point is the destination.
+func dragPath(x0, y0, x1, y1 float64, steps int) [][2]float64 {
+	if steps < 1 {
+		steps = 10
+	}
+
+	path := make([][2]float64, 0, steps)
+	for i := 1; i <= steps; i++ {
+		f := float64(i) / float64(steps)
+		path = append(path, [2]float64{x0 + (x1-x0)*f, y0 + (y1-y0)*f})
+	}
+	return path
+}
+
 func (s *Server) drag(ctx context.Context, x0, y0, x1, y1 float64, button ebiten.MouseButton, steps int) error {
 	if steps <= 0 {
 		steps = 10
@@ -318,7 +349,7 @@ func (s *Server) drag(ctx context.Context, x0, y0, x1, y1 float64, button ebiten
 
 	inj := s.rt.Injector()
 
-	dragCtx, cancel := context.WithTimeout(ctx, time.Duration(steps+4)*200*time.Millisecond)
+	dragCtx, cancel := tickBudget(ctx, 2*(steps+4))
 	defer cancel()
 
 	inj.MoveCursor(x0, y0)
@@ -332,9 +363,8 @@ func (s *Server) drag(ctx context.Context, x0, y0, x1, y1 float64, button ebiten
 		return s.stalled(err)
 	}
 
-	for i := 1; i <= steps; i++ {
-		f := float64(i) / float64(steps)
-		inj.MoveCursor(x0+(x1-x0)*f, y0+(y1-y0)*f)
+	for _, at := range dragPath(x0, y0, x1, y1, steps) {
+		inj.MoveCursor(at[0], at[1])
 
 		if err := s.rt.WaitTicks(dragCtx, 1); err != nil {
 			inj.MouseUp(button)
@@ -380,9 +410,7 @@ func (s *Server) touch(ctx context.Context, _ *mcpsdk.CallToolRequest, in touchI
 		return nil, nil, err
 	}
 
-	if err := s.applyTouches(in.Touches); err != nil {
-		return nil, nil, err
-	}
+	s.applyTouches(in.Touches)
 
 	if in.ThenWaitTicks == 0 {
 		in.ThenWaitTicks = 1
@@ -393,14 +421,13 @@ func (s *Server) touch(ctx context.Context, _ *mcpsdk.CallToolRequest, in touchI
 
 // applyTouches replaces the set of active touches, shared with game_script so
 // the two cannot drift apart.
-func (s *Server) applyTouches(points []touchPoint) error {
+func (s *Server) applyTouches(points []touchPoint) {
 	touches := make([]hook.Touch, 0, len(points))
 	for _, t := range points {
 		touches = append(touches, hook.Touch{ID: t.ID, X: t.X, Y: t.Y})
 	}
 
 	s.rt.Injector().SetTouches(touches)
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -416,66 +443,81 @@ func (s *Server) inputState(ctx context.Context, _ *mcpsdk.CallToolRequest, _ em
 	// Read from inside the loop: input state is only coherent for the tick it
 	// belongs to, and reading it from outside would mix two of them.
 	if err := s.rt.Do(ctx, func() {
-		var pressed []string
-		for _, k := range inpututil.AppendPressedKeys(nil) {
-			pressed = append(pressed, k.String())
-		}
-
-		var buttons []string
-		for _, b := range []ebiten.MouseButton{ebiten.MouseButtonLeft, ebiten.MouseButtonRight, ebiten.MouseButtonMiddle} {
-			if ebiten.IsMouseButtonPressed(b) {
-				buttons = append(buttons, buttonName(b))
-			}
-		}
-
-		var touches []touchPoint
-		for _, id := range ebiten.AppendTouchIDs(nil) {
-			x, y := ebiten.TouchPosition(id)
-			touches = append(touches, touchPoint{ID: int(id), X: x, Y: y})
-		}
-
-		var gamepads []map[string]any
-		for _, id := range ebiten.AppendGamepadIDs(nil) {
-			var buttons []int
-			for b := 0; b < ebiten.GamepadButtonCount(id); b++ {
-				if ebiten.IsGamepadButtonPressed(id, ebiten.GamepadButton(b)) {
-					buttons = append(buttons, b)
-				}
-			}
-
-			var axes []float64
-			for a := 0; a < ebiten.GamepadAxisCount(id); a++ {
-				axes = append(axes, ebiten.GamepadAxisValue(id, a))
-			}
-
-			// The SDL id is here because it is what a game switches on to decide
-			// what kind of controller this is, so seeing it is often the answer
-			// to "why is the game ignoring my gamepad".
-			gamepads = append(gamepads, map[string]any{
-				"id":              int(id),
-				"name":            ebiten.GamepadName(id),
-				"sdl_id":          ebiten.GamepadSDLID(id),
-				"standard_layout": ebiten.IsStandardGamepadLayoutAvailable(id),
-				"buttons_pressed": buttons,
-				"axes":            axes,
-			})
-		}
-
 		cx, cy := ebiten.CursorPosition()
 		wx, wy := ebiten.Wheel()
 
-		out["gamepads"] = gamepads
-		out["keys_pressed"] = pressed
-		out["mouse_buttons"] = buttons
+		out["keys_pressed"] = pressedKeys()
+		out["mouse_buttons"] = pressedMouseButtons()
+		out["touches"] = activeTouches()
+		out["gamepads"] = connectedGamepads()
 		out["cursor"] = map[string]int{"x": cx, "y": cy}
 		out["wheel"] = map[string]float64{"x": wx, "y": wy}
-		out["touches"] = touches
 	}); err != nil {
 		return nil, nil, s.stalled(err)
 	}
 
 	out["tick"] = s.rt.Tick()
 	return nil, out, nil
+}
+
+func pressedKeys() []string {
+	var keys []string
+	for _, k := range inpututil.AppendPressedKeys(nil) {
+		keys = append(keys, k.String())
+	}
+	return keys
+}
+
+func pressedMouseButtons() []string {
+	var names []string
+	for _, b := range []ebiten.MouseButton{ebiten.MouseButtonLeft, ebiten.MouseButtonRight, ebiten.MouseButtonMiddle} {
+		if ebiten.IsMouseButtonPressed(b) {
+			names = append(names, buttonName(b))
+		}
+	}
+	return names
+}
+
+func activeTouches() []touchPoint {
+	var touches []touchPoint
+	for _, id := range ebiten.AppendTouchIDs(nil) {
+		x, y := ebiten.TouchPosition(id)
+		touches = append(touches, touchPoint{ID: int(id), X: x, Y: y})
+	}
+	return touches
+}
+
+// connectedGamepads describes every pad the game can see.
+//
+// The SDL id is here because it is what a game switches on to decide what kind
+// of controller this is, so seeing it is often the whole answer to "why is the
+// game ignoring my gamepad".
+func connectedGamepads() []map[string]any {
+	var pads []map[string]any
+
+	for _, id := range ebiten.AppendGamepadIDs(nil) {
+		var pressed []int
+		for b := 0; b < ebiten.GamepadButtonCount(id); b++ {
+			if ebiten.IsGamepadButtonPressed(id, ebiten.GamepadButton(b)) {
+				pressed = append(pressed, b)
+			}
+		}
+
+		var axes []float64
+		for a := 0; a < ebiten.GamepadAxisCount(id); a++ {
+			axes = append(axes, ebiten.GamepadAxisValue(id, a))
+		}
+
+		pads = append(pads, map[string]any{
+			"id":              int(id),
+			"name":            ebiten.GamepadName(id),
+			"sdl_id":          ebiten.GamepadSDLID(id),
+			"standard_layout": ebiten.IsStandardGamepadLayoutAvailable(id),
+			"buttons_pressed": pressed,
+			"axes":            axes,
+		})
+	}
+	return pads
 }
 
 func buttonName(b ebiten.MouseButton) string {

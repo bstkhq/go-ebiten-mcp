@@ -62,7 +62,15 @@ func RunTests(m *testing.M, factory func() ebiten.Game, opts ...Option) {
 		code <- result
 	}()
 
-	if err := ebiten.RunGame(wrapped); err != nil {
+	err := ebiten.RunGame(wrapped)
+
+	// Before either exit, and before anything else is printed. Close puts the
+	// descriptors back, so what follows goes straight to the terminal instead of
+	// through a goroutine that os.Exit will not wait for — which is how the
+	// failure message and the last of the test output used to be lost.
+	rt.Close()
+
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "ebitenmcp: the game loop failed:", err)
 		os.Exit(1)
 	}
@@ -245,17 +253,15 @@ func (d *Driver) Click(x, y float64, button ...ebiten.MouseButton) {
 func (d *Driver) Drag(x0, y0, x1, y1 float64, steps int) {
 	d.t.Helper()
 
-	if steps < 1 {
-		steps = 10
-	}
-
 	d.Move(x0, y0)
 	d.rt.Injector().MouseDown(ebiten.MouseButtonLeft)
 	d.Tick(1)
 
-	for i := 1; i <= steps; i++ {
-		f := float64(i) / float64(steps)
-		d.rt.Injector().MoveCursor(x0+(x1-x0)*f, y0+(y1-y0)*f)
+	// The same line game_mouse walks, from the same function: a test and a tool
+	// that disagreed about where a drag ends would be a difference nobody could
+	// see until one of them failed.
+	for _, at := range dragPath(x0, y0, x1, y1, steps) {
+		d.rt.Injector().MoveCursor(at[0], at[1])
 		d.Tick(1)
 	}
 

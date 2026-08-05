@@ -22,7 +22,7 @@ func (s *Server) addFrameTools(srv *mcpsdk.Server) {
 type ringEnableInput struct {
 	BudgetMB int    `json:"budget_mb,omitempty" jsonschema:"how much memory the buffer may use; defaults to 64"`
 	Every    int    `json:"every,omitempty" jsonschema:"keep one frame out of every N drawn. Raise it to cover more time for the same memory, or when frames are being dropped"`
-	Stage    string `json:"stage,omitempty" jsonschema:"which drawing step to keep. Defaults to offscreen, unlike the other capture tools: this one runs continuously, and on a game with its own DrawFinalScreen the final screen is the size of the window rather than the logical resolution, which is many times the bytes off the GPU and through the encoder for every frame. Ask for final when the pass itself is what you are debugging"`
+	Stage    string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to offscreen here, unlike the other capture tools, because this one runs continuously and the final screen is the size of the window"`
 }
 
 type framesInput struct {
@@ -30,32 +30,46 @@ type framesInput struct {
 	Disable bool             `json:"disable,omitempty" jsonschema:"stop keeping frames and let go of them"`
 	Last    int              `json:"last,omitempty" jsonschema:"how many of the most recent kept frames to return; defaults to 12"`
 	Columns int              `json:"columns,omitempty" jsonschema:"columns in the contact sheet; defaults to 4"`
+	MaxSize int              `json:"max_size,omitempty" jsonschema:"longest side of the inline contact sheet in pixels; defaults to 1024"`
 }
 
+// frames is three tools wearing one name: turn the buffer on, turn it off, and
+// ask it what it has. They are one tool because that is how it reads to whoever
+// is using it — enable, wait, ask — but each is its own function here, since the
+// read path used to be the body of this one after a switch that returned, which
+// is easy to mistake for something that always runs.
 func (s *Server) frames(_ context.Context, _ *mcpsdk.CallToolRequest, in framesInput) (*mcpsdk.CallToolResult, any, error) {
 	ring := s.rt.Ring()
 
 	switch {
 	case in.Enable != nil:
-		stage := Stage(in.Enable.Stage)
-		if stage == "" {
-			stage = StageOffscreen
-		}
-		if stage != StageOffscreen && stage != StageFinal {
-			return nil, nil, fmt.Errorf("unknown stage %q: %s", in.Enable.Stage, stageDoc)
-		}
-
-		ring.Enable(in.Enable.BudgetMB<<20, in.Enable.Every, stage)
-		return nil, map[string]any{
-			"ring": ring.Status(),
-			"note": "keeping frames now; ask again without enable to get them",
-		}, nil
-
+		return s.enableFrames(ring, *in.Enable)
 	case in.Disable:
 		ring.Disable()
 		return nil, map[string]any{"ring": ring.Status()}, nil
+	default:
+		return s.readFrames(ring, in)
+	}
+}
+
+func (s *Server) enableFrames(ring *frameRing, in ringEnableInput) (*mcpsdk.CallToolResult, any, error) {
+	stage := Stage(in.Stage)
+	if stage == "" {
+		stage = StageOffscreen
+	}
+	if stage != StageOffscreen && stage != StageFinal {
+		return nil, nil, fmt.Errorf("unknown stage %q: %s", in.Stage, stageDoc)
 	}
 
+	ring.Enable(in.BudgetMB<<20, in.Every, stage)
+
+	return nil, map[string]any{
+		"ring": ring.Status(),
+		"note": "keeping frames now; ask again without enable to get them",
+	}, nil
+}
+
+func (s *Server) readFrames(ring *frameRing, in framesInput) (*mcpsdk.CallToolResult, any, error) {
 	if in.Last <= 0 {
 		in.Last = 12
 	}
@@ -94,24 +108,19 @@ func (s *Server) frames(_ context.Context, _ *mcpsdk.CallToolRequest, in framesI
 		return nil, nil, err
 	}
 
-	data, err := encodePNG(fitInline(sheet, inlineMaxSize))
+	note := fmt.Sprintf("%d frames, ticks %d to %d",
+		len(frames), frames[0].Tick, frames[len(frames)-1].Tick)
+
+	result, _, err := imageResult(sheet, art, note, in.MaxSize, false)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	note := fmt.Sprintf("%d frames, ticks %d to %d",
-		len(frames), frames[0].Tick, frames[len(frames)-1].Tick)
-
-	return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{
-				&mcpsdk.ImageContent{Data: data, MIMEType: "image/png"},
-				&mcpsdk.TextContent{Text: note + "\n" + art.Path},
-			},
-		}, map[string]any{
-			"frames":        len(frames),
-			"first_tick":    frames[0].Tick,
-			"last_tick":     frames[len(frames)-1].Tick,
-			"contact_sheet": art,
-			"ring":          ring.Status(),
-		}, nil
+	return result, map[string]any{
+		"frames":        len(frames),
+		"first_tick":    frames[0].Tick,
+		"last_tick":     frames[len(frames)-1].Tick,
+		"contact_sheet": art,
+		"ring":          ring.Status(),
+	}, nil
 }

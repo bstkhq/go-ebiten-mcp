@@ -62,23 +62,11 @@ func (s *Server) addStateTools(srv *mcpsdk.Server) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) state(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*mcpsdk.CallToolResult, any, error) {
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
-
 	paused, steps := s.rt.Paused()
 	sinceTick := time.Since(s.rt.LastTick())
+	loop := s.loopState(paused, sinceTick)
 
 	w, h := ebiten.WindowSize()
-
-	loop := "running"
-	switch {
-	case s.rt.Crash() != nil:
-		loop = "crashed"
-	case paused:
-		loop = "paused"
-	case sinceTick > time.Second:
-		loop = "stalled"
-	}
 
 	out := map[string]any{
 		"name":            s.opts.Name,
@@ -99,12 +87,7 @@ func (s *Server) state(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*m
 
 		"input": s.inputStatus(),
 
-		"go": map[string]any{
-			"version":    runtime.Version(),
-			"goroutines": runtime.NumGoroutine(),
-			"heap_mb":    round2(float64(mem.HeapAlloc) / (1 << 20)),
-			"gc_cycles":  mem.NumGC,
-		},
+		"go": goStats(),
 
 		"state_providers": stateProviderNames(),
 		"media_dir":       s.media.dir,
@@ -138,6 +121,34 @@ const crashTracesWindow = 60
 
 func (s *Server) crashTraces(crash *Crash) []TraceLine {
 	return filterTraces(s.traces.Lines(), "", "", crash.Tick-crashTracesWindow, 40)
+}
+
+// loopState is the one-word answer to "is this game alive", and the reason
+// game_state is worth calling first: a stalled loop and a paused one look the
+// same from outside and mean completely different things.
+func (s *Server) loopState(paused bool, sinceTick time.Duration) string {
+	switch {
+	case s.rt.Crash() != nil:
+		return "crashed"
+	case paused:
+		return "paused"
+	case sinceTick > time.Second:
+		return "stalled"
+	default:
+		return "running"
+	}
+}
+
+func goStats() map[string]any {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	return map[string]any{
+		"version":    runtime.Version(),
+		"goroutines": runtime.NumGoroutine(),
+		"heap_mb":    round2(float64(mem.HeapAlloc) / (1 << 20)),
+		"gc_cycles":  mem.NumGC,
+	}
 }
 
 func (s *Server) inputStatus() map[string]any {

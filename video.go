@@ -2,6 +2,7 @@ package ebitenmcp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/color/palette"
@@ -24,7 +25,7 @@ import (
 // a GIF that looks like the game rather than like 1998. Without ffmpeg only the
 // standard library's fixed palette is left; it is noticeably worse, and a
 // mediocre recording still beats a missing one.
-func (s *Server) saveVideo(frames []*Frame, format string) (*Artifact, error) {
+func (s *Server) saveVideo(ctx context.Context, frames []*Frame, format string) (*Artifact, error) {
 	if len(frames) == 0 {
 		return nil, fmt.Errorf("nothing to encode")
 	}
@@ -35,13 +36,13 @@ func (s *Server) saveVideo(frames []*Frame, format string) (*Artifact, error) {
 	switch format {
 	case "gif":
 		if haveFFmpeg {
-			return s.encodeWithFFmpeg(frames, "gif")
+			return s.encodeWithFFmpeg(ctx, frames, "gif")
 		}
 		return s.saveGIF(frames)
 
 	case "", "mp4":
 		if haveFFmpeg {
-			return s.encodeWithFFmpeg(frames, "mp4")
+			return s.encodeWithFFmpeg(ctx, frames, "mp4")
 		}
 		// Asked for mp4 and cannot make one; a gif is closer to the intent
 		// than an error.
@@ -52,7 +53,7 @@ func (s *Server) saveVideo(frames []*Frame, format string) (*Artifact, error) {
 	}
 }
 
-func (s *Server) encodeWithFFmpeg(frames []*Frame, format string) (*Artifact, error) {
+func (s *Server) encodeWithFFmpeg(ctx context.Context, frames []*Frame, format string) (*Artifact, error) {
 	b := frames[0].Image.Bounds()
 	name := fmt.Sprintf("rec-%04d.%s", artifactSeq.Add(1), format)
 	path := filepath.Join(s.media.dir, name)
@@ -83,7 +84,10 @@ func (s *Server) encodeWithFFmpeg(frames []*Frame, format string) (*Artifact, er
 			"-preset", "veryfast")
 	}
 
-	cmd := exec.Command("ffmpeg", append(args, path)...)
+	// With the context, so a stalled ffmpeg cannot hold the tool open for ever.
+	// game_record already budgets for the frames it was asked for; before this
+	// it computed that budget and then never passed it on.
+	cmd := exec.CommandContext(ctx, "ffmpeg", append(args, path)...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
