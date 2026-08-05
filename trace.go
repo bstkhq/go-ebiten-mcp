@@ -18,6 +18,14 @@ type TraceLine struct {
 	Text   string    `json:"text"`
 }
 
+// traceHistory is how many lines are kept.
+//
+// A count and not a byte budget, which is the right way round only because the
+// pump already caps a single line at maxKeptLine: two thousand lines of at most
+// eight kilobytes is sixteen megabytes in the worst case anybody can construct,
+// and the worst case is a game printing stack traces every tick. Without that
+// cap a count would bound nothing, since one line can be as long as the process
+// cares to make it.
 const traceHistory = 2000
 
 // traceRing keeps the last few thousand lines the process produced, tagged with

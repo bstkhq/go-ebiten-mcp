@@ -480,6 +480,11 @@ func (r *Runtime) advance(update, draw, wall time.Duration) {
 	r.lastTick = time.Now()
 	tick := r.tick
 
+	// Closed and replaced every tick, whether or not anybody is waiting. That
+	// looks wasteful and is not worth avoiding: an empty-struct channel is about
+	// a hundred bytes, so sixty a second is a few kilobytes, and the alternative
+	// is counting waiters — a protocol whose failure mode is a wake-up that never
+	// arrives. WaitTicks has already had one of those.
 	close(r.tickCh)
 	r.tickCh = make(chan struct{})
 	r.mu.Unlock()

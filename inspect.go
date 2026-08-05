@@ -177,11 +177,26 @@ func (w *walker) walkList(v reflect.Value, depth int) any {
 	return out
 }
 
+// walkMap sorts by the key's printed form, because a map has no order and an
+// inspection that came back differently every time would be useless for
+// comparing two of them.
+//
+// Each key is printed once and the printed form is what gets sorted. It used to
+// print both sides of every comparison inside the sort, so a map of a thousand
+// keys did twenty thousand reflect-and-format calls to show fifty of them —
+// inside Update, with the game waiting.
 func (w *walker) walkMap(v reflect.Value, depth int) any {
-	keys := v.MapKeys()
-	sort.Slice(keys, func(i, j int) bool {
-		return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
-	})
+	type mapKey struct {
+		name  string
+		value reflect.Value
+	}
+
+	keys := make([]mapKey, 0, v.Len())
+	for _, k := range v.MapKeys() {
+		keys = append(keys, mapKey{name: fmt.Sprint(k.Interface()), value: k})
+	}
+
+	sort.Slice(keys, func(i, j int) bool { return keys[i].name < keys[j].name })
 
 	out := map[string]any{}
 	for i, k := range keys {
@@ -189,7 +204,7 @@ func (w *walker) walkMap(v reflect.Value, depth int) any {
 			out["__truncated"] = fmt.Sprintf("%d more of %d", len(keys)-i, len(keys))
 			break
 		}
-		out[fmt.Sprint(k.Interface())] = w.walk(v.MapIndex(k), depth+1)
+		out[k.name] = w.walk(v.MapIndex(k.value), depth+1)
 	}
 	return out
 }

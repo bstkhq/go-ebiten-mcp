@@ -104,6 +104,29 @@ func TestTypedTextReachesTheField(t *testing.T) {
 	}
 }
 
+// TestWithGameRunsInsideTheLoop covers the escape hatch that used to be a trap.
+//
+// Driver.Game handed the live object back, and the caller then read it from the
+// test's goroutine while Update was running — which is the one thing everything
+// else in this package goes through Do to prevent. WithGame runs the closure
+// where the game is not.
+func TestWithGameRunsInsideTheLoop(t *testing.T) {
+	d := ebitenmcp.T(t)
+
+	d.Tap(ebiten.KeyArrowDown)
+
+	var selected int
+	d.WithGame(func(game ebiten.Game) {
+		// Read straight off the real type, which is the point of this over
+		// Inspect — and safe only because of where it runs.
+		selected = game.(*Game).screens.menu.selected
+	})
+
+	if selected != 1 {
+		t.Errorf("read selected=%d after one press, want 1", selected)
+	}
+}
+
 // TestMenuLooksRight is the visual regression: run with -update to record what
 // the menu should look like, and from then on any unintended change to it fails
 // here with the expected, actual and difference images written to testdata.

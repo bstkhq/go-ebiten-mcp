@@ -327,10 +327,26 @@ func (d *Driver) Inspect(path string) any {
 	return value
 }
 
-// Game returns the game under test, for assertions that are easier to write
-// against the real type than against an inspected tree.
-func (d *Driver) Game() ebiten.Game {
-	return d.rt.currentGame()
+// WithGame runs fn against the game under test, inside the game loop.
+//
+// Assertions are often easier to write against the real type than against an
+// inspected tree, and this is how to do that safely. It used to be a Game()
+// that handed the object back, which read as convenient and was a trap: the
+// caller then touched a live game from the test's goroutine while Update was
+// running, which is the one thing this package's whole design exists to
+// prevent — every tool goes through Do for exactly this reason, and the escape
+// hatch quietly did not.
+//
+// fn must not block: the loop is waiting for it.
+func (d *Driver) WithGame(fn func(ebiten.Game)) {
+	d.t.Helper()
+
+	ctx, cancel := d.ctx()
+	defer cancel()
+
+	if err := d.rt.Do(ctx, func() { fn(d.rt.currentGame()) }); err != nil {
+		d.fatal(err)
+	}
 }
 
 // Runtime exposes the underlying runtime, for anything the driver does not
