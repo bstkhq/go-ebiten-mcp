@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -105,9 +106,10 @@ func mcpCommand(args []string, url string) error {
 	return server.Run(ctx, &mcpsdk.StdioTransport{})
 }
 
-// Path is the route the game serves MCP on, spelled out here rather than
-// imported: importing the library would make this command open a window.
-const Path = "/mcp"
+// Path is the route the game serves MCP on. From internal/wire, which exists so
+// that this command and the library can agree without this one importing the
+// library and opening a window.
+const Path = wire.Path
 
 type control struct {
 	opts  controlOptions

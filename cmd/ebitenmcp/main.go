@@ -30,17 +30,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
-	defaultAddr = "127.0.0.1:8384"
+	defaultAddr = wire.DefaultAddr
 
 	// modulePath is spelled out rather than taken from build info, which reports
 	// an empty path for a binary built with `go build` from the module itself —
 	// exactly how this is run while being worked on.
 	modulePath = "github.com/bstkhq/go-ebiten-mcp"
-	defaultURL = "http://" + defaultAddr + "/mcp"
+	defaultURL = "http://" + defaultAddr + wire.Path
 )
 
 func main() {

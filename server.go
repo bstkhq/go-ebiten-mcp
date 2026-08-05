@@ -10,11 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// sessionTimeout is how long an MCP session survives with nothing arriving on
+// it. See routes.
+const sessionTimeout = 30 * time.Minute
+
 // Path is the route the MCP endpoint is mounted on.
-const Path = "/mcp"
+const Path = wire.Path
 
 // Server exposes one running game over MCP.
 type Server struct {
@@ -100,8 +105,17 @@ func listen(addr string) (net.Listener, error) {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
+	// A session per client, and none kept for a client that walked away.
+	//
+	// The handler was built with nil options, which leaves idle sessions in
+	// place for ever: an agent that disconnects without saying so — a crashed
+	// editor, a dropped network — leaves its session behind, and a game that
+	// runs for days collects one for every one of them. Half an hour is far
+	// longer than any gap between calls in a debugging session and far shorter
+	// than a working day.
 	mux.Handle(Path, mcpsdk.NewStreamableHTTPHandler(
-		func(*http.Request) *mcpsdk.Server { return s.mcp() }, nil))
+		func(*http.Request) *mcpsdk.Server { return s.mcp() },
+		&mcpsdk.StreamableHTTPOptions{SessionTimeout: sessionTimeout}))
 
 	// Artifacts are served from the same listener the tools already advertise,
 	// so a client that can render a URL gets the video for free.
@@ -211,21 +225,12 @@ func loopback(addr string) bool {
 	return host == "localhost"
 }
 
-type discovery struct {
-	Name string `json:"name"`
-	PID  int    `json:"pid"`
-	Addr string `json:"addr"`
-	URL  string `json:"url"`
-	CWD  string `json:"cwd"`
-	Args string `json:"args"`
-}
-
 func (s *Server) discoveryFile(remove bool) {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	dir = filepath.Join(dir, "ebitenmcp")
+	dir = filepath.Join(dir, wire.DiscoveryDir)
 
 	path := filepath.Join(dir, fmt.Sprintf("%d.json", os.Getpid()))
 	if remove {
@@ -244,7 +249,7 @@ func (s *Server) discoveryFile(remove bool) {
 	}
 
 	cwd, _ := os.Getwd()
-	data, err := json.MarshalIndent(discovery{
+	data, err := json.MarshalIndent(wire.Discovery{
 		Name: s.opts.Name,
 		PID:  os.Getpid(),
 		Addr: s.addr,

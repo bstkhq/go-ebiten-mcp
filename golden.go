@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
 )
 
 // RendererEnv carries which rasteriser a run is drawing with. `ebitenmcp run`
 // sets it after asking the display; nothing sets it when a game is started by
 // hand, and then the checks below simply have nothing to say.
-const RendererEnv = "EBITENMCP_RENDERER"
+const RendererEnv = wire.RendererEnv
 
 // Golden image comparison, with three deliberate choices.
 //

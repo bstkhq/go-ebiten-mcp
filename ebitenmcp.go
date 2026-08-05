@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -11,12 +12,12 @@ import (
 // socket is opened and no goroutine is started, which is why leaving RunGame in
 // a release build costs nothing. Setting it opens an unauthenticated port; bind
 // loopback, and see the README before doing anything else with it.
-const AddrEnv = "EBITEN_MCP_ADDR"
+const AddrEnv = wire.AddrEnv
 
 // CaptureEnv overrides which stage captures come from. Set it to "offscreen" in
 // a game whose final pass is expensive and whose final pass you do not care
 // about; see WithCaptureStage for why that is not the default.
-const CaptureEnv = "EBITEN_MCP_CAPTURE"
+const CaptureEnv = wire.CaptureEnv
 
 // Options configures a wrapped game.
 type Options struct {

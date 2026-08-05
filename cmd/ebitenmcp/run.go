@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
 )
 
 // parseRunFlags reads the flags and returns what is left, which is the command
@@ -161,11 +163,12 @@ func runCommand(args []string) error {
 	return cmd.Wait()
 }
 
-// AddrEnvName and rendererEnv mirror the library's constants without importing
+// From internal/wire, which is where the library takes them from too, so they
+// can no longer drift. What must not happen is importing the library itself:
 // it, which would make this command need a display of its own to start.
 const (
-	AddrEnvName = "EBITEN_MCP_ADDR"
-	rendererEnv = "EBITENMCP_RENDERER"
+	AddrEnvName = wire.AddrEnv
+	rendererEnv = wire.RendererEnv
 )
 
 // renderer asks the display what it will actually draw with.
