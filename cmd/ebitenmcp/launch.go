@@ -32,6 +32,9 @@ type tailWriter struct {
 	max     int
 }
 
+// maxPartial bounds a line that never ends.
+const maxPartial = 64 << 10
+
 func newTail(max int, through io.Writer) *tailWriter {
 	return &tailWriter{max: max, through: through}
 }
@@ -49,6 +52,16 @@ func (t *tailWriter) Write(p []byte) (int, error) {
 	defer t.mu.Unlock()
 
 	t.partial = append(t.partial, p...)
+
+	// A child writing without a newline — a progress bar, a hung logger — would
+	// otherwise grow this until the machine gave out. Past a line's worth it is
+	// flushed as one, since the point of keeping it is to have the last thing
+	// said before something died.
+	if len(t.partial) > maxPartial {
+		t.add(string(t.partial))
+		t.partial = t.partial[:0]
+	}
+
 	for {
 		i := bytes.IndexByte(t.partial, '\n')
 		if i < 0 {

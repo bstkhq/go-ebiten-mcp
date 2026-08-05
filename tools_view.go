@@ -478,6 +478,15 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 	}
 
 	comparison, changed := compareImages(before.Image, after.Image)
+	if changed < 0 {
+		// The screen changed size between the two captures, so there is no
+		// per-pixel difference to report. Saying so beats the -1 that used to
+		// come back and be printed as a negative percentage.
+		return nil, nil, fmt.Errorf("the screen changed size between the two captures, "+
+			"from %v to %v, so there is nothing to compare pixel by pixel. "+
+			"Take them again once it has settled",
+			before.Image.Bounds(), after.Image.Bounds())
+	}
 
 	art, err := s.media.savePNG("compare", comparison)
 	if err != nil {

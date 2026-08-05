@@ -36,9 +36,16 @@ const (
 )
 
 // inputEvent is what gets written to the device: 24 bytes on a 64-bit kernel.
+// inputEvent mirrors the kernel's struct input_event.
+//
+// The two time fields are `int`, not `int64`, because the kernel's are `long`:
+// eight bytes on a 64-bit platform and four on a 32-bit one, which is exactly
+// what Go's int is. Writing int64 there produced a 24-byte struct on 32-bit
+// where the kernel expects 16, so every event after the first would have been
+// read from the wrong offset — on the machines nobody tests this on.
 type inputEvent struct {
-	sec   int64
-	usec  int64
+	sec   int
+	usec  int
 	typ   uint16
 	code  uint16
 	value int32

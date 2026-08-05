@@ -226,7 +226,7 @@ func startDisplay(opts runOptions) (string, string, func(), error) {
 		x := newXOptions()
 		x.gpu, x.screen = opts.gpu, opts.screen
 
-		display, started, err := startXContainer(x)
+		display, started, err := startXContainer(context.Background(), x)
 		if err != nil {
 			return "", "", nil, err
 		}

@@ -60,6 +60,10 @@ type frameRing struct {
 	dropped int64
 	encoded int64
 
+	// slots is the encoder queue's capacity, held as tokens so that a frame can
+	// be refused before it is read back rather than after.
+	slots chan struct{}
+
 	queue chan pendingFrame
 	stop  chan struct{}
 	done  chan struct{}
@@ -131,12 +135,13 @@ func (r *frameRing) Enable(budget, every int, stage Stage) {
 	r.frames, r.bytes = nil, 0
 	r.seen, r.dropped, r.encoded = 0, 0, 0
 	r.queue = make(chan pendingFrame, ringQueueDepth)
+	r.slots = make(chan struct{}, ringQueueDepth)
 	r.stop = make(chan struct{})
 	r.done = make(chan struct{})
-	queue, stop, done := r.queue, r.stop, r.done
+	queue, slots, stop, done := r.queue, r.slots, r.stop, r.done
 	r.mu.Unlock()
 
-	go r.encode(queue, stop, done)
+	go r.encode(queue, slots, stop, done)
 }
 
 // Disable stops keeping frames and lets go of the ones it had.
@@ -156,54 +161,111 @@ func (r *frameRing) disable() {
 	}
 
 	r.enabled = false
-	stop, done := r.stop, r.done
+	stop, done, queue := r.stop, r.done, r.queue
 	r.frames, r.bytes = nil, 0
+	r.queue, r.slots = nil, nil
 	r.mu.Unlock()
 
 	close(stop)
 	<-done
+
+	// Whatever the encoder never got to. Without this the queue and up to four
+	// full-resolution frames stayed referenced by a ring that reports itself as
+	// holding nothing.
+	for len(queue) > 0 {
+		<-queue
+	}
 }
 
 // wants reports whether this frame should be kept, and is deliberately cheap:
 // it runs inside Draw on every single frame.
+//
+// It also claims the slot in the encoder's queue, before the caller pays for the
+// frame. Deciding afterwards — reading the pixels back, allocating the image,
+// and only then discovering the queue was full — meant a dropped frame had
+// already cost a synchronisation with the GPU and eight megabytes at 1080p. The
+// point of dropping is not to pay.
 func (r *frameRing) wants() bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if !r.enabled {
+		r.mu.Unlock()
 		return false
 	}
 
 	keep := r.seen%int64(r.every) == 0
 	r.seen++
-	return keep
-}
-
-// offer hands a frame to the encoder, or drops it.
-//
-// Dropping rather than blocking is the whole point: waiting here would stall the
-// game's draw on a JPEG encoder, which is exactly the sort of help nobody asked
-// for.
-func (r *frameRing) offer(img *image.RGBA, tick int64) {
-	r.mu.Lock()
 	queue := r.queue
-	enabled := r.enabled
 	r.mu.Unlock()
 
+	if !keep || queue == nil {
+		return false
+	}
+
+	select {
+	case r.slots <- struct{}{}:
+		return true
+	default:
+		r.mu.Lock()
+		r.dropped++
+		r.mu.Unlock()
+		return false
+	}
+}
+
+// wantsNext peeks at whether the next frame offered would be kept, without
+// claiming it. Used to decide whether a frame is worth forcing into existence at
+// all; wants is what actually consumes one.
+func (r *frameRing) wantsNext() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.enabled && r.seen%int64(r.every) == 0
+}
+
+// offer hands a frame to the encoder.
+//
+// It cannot block and it cannot drop: wants already claimed the slot this frame
+// is going into, which is why the decision is made there and not here.
+func (r *frameRing) offer(img *image.RGBA, tick int64) {
+	r.mu.Lock()
+	queue, slots, enabled := r.queue, r.slots, r.enabled
+	r.mu.Unlock()
+
+	// Both taken under the lock and both checked before use. Disable clears them
+	// while a frame may already be on its way here, and a receive from a nil
+	// channel blocks for ever — which on this path is the game's draw, so the
+	// game would stop drawing because somebody turned the buffer off.
 	if !enabled || queue == nil {
+		releaseSlot(slots)
 		return
 	}
 
 	select {
 	case queue <- pendingFrame{image: img, tick: tick, when: time.Now()}:
 	default:
+		// Only reachable if the ring was restarted between wants and here.
+		releaseSlot(slots)
+
 		r.mu.Lock()
 		r.dropped++
 		r.mu.Unlock()
 	}
 }
 
-func (r *frameRing) encode(queue chan pendingFrame, stop, done chan struct{}) {
+// releaseSlot hands a claimed slot back, if there is still a ring holding them.
+// Never blocks: a slot nobody is waiting for is not worth stopping a frame over.
+func releaseSlot(slots chan struct{}) {
+	if slots == nil {
+		return
+	}
+	select {
+	case <-slots:
+	default:
+	}
+}
+
+func (r *frameRing) encode(queue chan pendingFrame, slots, stop, done chan struct{}) {
 	defer close(done)
 
 	for {
@@ -212,7 +274,15 @@ func (r *frameRing) encode(queue chan pendingFrame, stop, done chan struct{}) {
 			return
 		case pending := <-queue:
 			var buf bytes.Buffer
-			if err := jpeg.Encode(&buf, pending.image, &jpeg.Options{Quality: ringJPEGQuality}); err != nil {
+			err := jpeg.Encode(&buf, pending.image, &jpeg.Options{Quality: ringJPEGQuality})
+
+			// The slot goes back whether or not the encode worked, or the buffer
+			// would quietly shrink its own capacity one failure at a time. Taken
+			// as an argument rather than read from the struct, because Disable
+			// clears the field while this goroutine may still be running.
+			releaseSlot(slots)
+
+			if err != nil {
 				continue
 			}
 			r.keep(ringFrame{Tick: pending.tick, Time: pending.when, Data: buf.Bytes()})

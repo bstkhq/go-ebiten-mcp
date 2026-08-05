@@ -161,7 +161,15 @@ func (r *Runtime) captureWanted() bool {
 	ring := r.ring
 	r.mu.Unlock()
 
-	return waiting > 0 || (ring != nil && ring.Enabled())
+	if waiting > 0 {
+		return true
+	}
+
+	// The buffer being on is not enough. With `every: 60` it keeps one frame in
+	// sixty, and forcing the final pass on the other fifty-nine turns off the
+	// engine's own optimisation for a picture that is not changing — and runs
+	// the game's shader — for frames nobody will ever look at.
+	return ring != nil && ring.wantsNext()
 }
 
 // beginCapture decides what this frame owes, and takes the waiters off the

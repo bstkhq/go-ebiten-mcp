@@ -91,6 +91,12 @@ func writeMCPConfig(start string) error {
 		if err := json.Unmarshal(existing, &config); err != nil {
 			return fmt.Errorf("%s exists and is not valid JSON: %w", path, err)
 		}
+		// A file containing literally `null` is valid JSON and unmarshals the
+		// map to nil, so the next line would write to a nil map and panic. An
+		// empty file is the same shape.
+		if config == nil {
+			config = map[string]any{}
+		}
 		if config["mcpServers"] == nil {
 			config["mcpServers"] = map[string]any{}
 		}

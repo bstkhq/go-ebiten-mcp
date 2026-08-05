@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -127,6 +128,13 @@ type control struct {
 	out     *tailWriter
 	exited  bool
 	exitErr error
+
+	// generation counts launches, so the watcher goroutine of a process that has
+	// been replaced cannot report on its successor. A quick stop-then-start left
+	// the old watcher about to write, and what it wrote was "the game this
+	// server started has exited" — about a game that was running fine, with the
+	// dead one's output attached.
+	generation int
 }
 
 func (c *control) addTools(server *mcpsdk.Server) {
@@ -282,12 +290,17 @@ func (c *control) launch() (<-chan error, *tailWriter, error) {
 		return nil, nil, fmt.Errorf("starting the game with %q: %w", c.opts.start, err)
 	}
 
+	c.generation++
+	generation := c.generation
+
 	exit := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
 
 		c.mu.Lock()
-		c.exited, c.exitErr = true, err
+		if c.generation == generation {
+			c.exited, c.exitErr = true, err
+		}
 		c.mu.Unlock()
 
 		exit <- err
@@ -328,6 +341,7 @@ func (c *control) stop(_ context.Context, _ *mcpsdk.CallToolRequest, _ emptyInpu
 
 	c.game, c.out = nil, nil
 	c.exited, c.exitErr = false, nil
+	c.generation++
 
 	// The forwarding session points at a process that is being killed. Letting
 	// go of it now means the next call reconnects rather than failing once on a
@@ -419,9 +433,21 @@ func alive(ctx context.Context, url string) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
-	return resp.StatusCode < 500
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	// The status page names itself on its first line. Any status under 500 used
+	// to count, so whatever else happened to be on that port — a 404 from a dev
+	// server, a 401 from a proxy — was read as "the game is already up", and
+	// game_start would report success for a game that was never started.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(body), "go-ebiten-mcp")
 }
 
 type xStartInput struct {
@@ -429,14 +455,14 @@ type xStartInput struct {
 	Screen string `json:"screen,omitempty" jsonschema:"display size, for example 1280x720"`
 }
 
-func (c *control) xStart(_ context.Context, _ *mcpsdk.CallToolRequest, in xStartInput) (*mcpsdk.CallToolResult, any, error) {
+func (c *control) xStart(ctx context.Context, _ *mcpsdk.CallToolRequest, in xStartInput) (*mcpsdk.CallToolResult, any, error) {
 	opts := newXOptions()
 	opts.gpu = in.GPU || c.opts.gpu
 	if in.Screen != "" {
 		opts.screen = in.Screen
 	}
 
-	display, started, err := startXContainer(opts)
+	display, started, err := startXContainer(ctx, opts)
 	if err != nil {
 		return nil, nil, err
 	}

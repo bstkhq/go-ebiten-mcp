@@ -106,11 +106,11 @@ func (s *Server) setTPS(_ context.Context, _ *mcpsdk.CallToolRequest, in setTPSI
 }
 
 type waitInput struct {
-	Ticks   int    `json:"ticks,omitempty" jsonschema:"wait this many ticks"`
-	Path    string `json:"path,omitempty" jsonschema:"a game state path to watch, for example screens.player.pos.x"`
-	Equals  string `json:"equals,omitempty" jsonschema:"stop when the path's value, formatted as text, equals this"`
-	Changed bool   `json:"changed,omitempty" jsonschema:"stop as soon as the path's value changes at all"`
-	Timeout int    `json:"timeout_ticks,omitempty" jsonschema:"give up after this many ticks; defaults to 600"`
+	Ticks   int     `json:"ticks,omitempty" jsonschema:"wait this many ticks"`
+	Path    string  `json:"path,omitempty" jsonschema:"a game state path to watch, for example screens.player.pos.x"`
+	Equals  *string `json:"equals,omitempty" jsonschema:"stop when the path's value, formatted as text, equals this. An empty string is a value like any other, which is why this is nullable: leave it out to not test equality"`
+	Changed bool    `json:"changed,omitempty" jsonschema:"stop as soon as the path's value changes at all"`
+	Timeout int     `json:"timeout_ticks,omitempty" jsonschema:"give up after this many ticks; defaults to 600"`
 }
 
 // wait is the difference between polling a game and asking it a question. A
@@ -135,6 +135,10 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 		}, nil
 	}
 
+	if in.Equals == nil && !in.Changed {
+		return nil, nil, fmt.Errorf("waiting on %s needs something to wait for: "+
+			"equals, or changed", in.Path)
+	}
 	if in.Timeout <= 0 {
 		in.Timeout = 600
 	}
@@ -147,17 +151,26 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 		return nil, nil, err
 	}
 
-	for i := 0; i < in.Timeout; i++ {
+	// One more read than there are ticks: the loop below checks, then waits, so
+	// without a check after the last wait a value that arrives on the very tick
+	// the budget ends is reported as a timeout. Waiting for something and being
+	// told it did not happen on the tick it did is the least useful answer this
+	// tool could give.
+	for i := 0; i <= in.Timeout; i++ {
 		value, err := s.pathValue(ctx, in.Path)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		switch {
-		case in.Equals != "" && fmt.Sprint(value) == in.Equals:
+		case in.Equals != nil && fmt.Sprint(value) == *in.Equals:
 			return nil, map[string]any{"tick": s.rt.Tick(), "value": value, "matched": "equals"}, nil
 		case in.Changed && fmt.Sprint(value) != fmt.Sprint(first):
 			return nil, map[string]any{"tick": s.rt.Tick(), "value": value, "was": first, "matched": "changed"}, nil
+		}
+
+		if i == in.Timeout {
+			break
 		}
 
 		if err := s.rt.WaitTicks(ctx, 1); err != nil {
@@ -170,8 +183,8 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 }
 
 func condition(in waitInput) string {
-	if in.Equals != "" {
-		return "reach " + in.Equals
+	if in.Equals != nil {
+		return fmt.Sprintf("reach %q", *in.Equals)
 	}
 	return "change"
 }

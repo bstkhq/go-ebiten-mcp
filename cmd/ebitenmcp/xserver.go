@@ -139,7 +139,7 @@ func xCommand(args []string) error {
 
 	switch action {
 	case "start":
-		display, started, err := startXContainer(opts)
+		display, started, err := startXContainer(context.Background(), opts)
 		if err != nil {
 			return err
 		}
@@ -191,7 +191,7 @@ func imageTag() string {
 }
 
 // ensureImage builds the image if it is not already there.
-func ensureImage(engine string, opts xOptions) (string, error) {
+func ensureImage(ctx context.Context, engine string, opts xOptions) (string, error) {
 	if opts.image != "" {
 		return opts.image, nil
 	}
@@ -218,8 +218,12 @@ func ensureImage(engine string, opts xOptions) (string, error) {
 
 	fmt.Fprintf(os.Stderr, "ebitenmcp: building the X server image %s, once\n", tag)
 
-	build, cancel := engineCommand(buildTimeout, engine, "build", "-t", tag, "-f", path, dir)
+	// Under the caller's context as well as its own deadline, so cancelling the
+	// MCP call that triggered a fifteen-minute image build actually stops it.
+	buildCtx, cancel := context.WithTimeout(ctx, buildTimeout)
 	defer cancel()
+
+	build := exec.CommandContext(buildCtx, engine, "build", "-t", tag, "-f", path, dir)
 
 	build.Stdout, build.Stderr = os.Stderr, os.Stderr
 
@@ -236,7 +240,7 @@ var xwaylandDisplay = regexp.MustCompile(`xserver listening on display (:\d+)`)
 //
 // That second value matters: a caller that reused somebody else's server has no
 // business stopping it on the way out.
-func startXContainer(opts xOptions) (display string, started bool, err error) {
+func startXContainer(ctx context.Context, opts xOptions) (display string, started bool, err error) {
 	engine, err := containerEngine(opts.engine)
 	if err != nil {
 		return "", false, err
@@ -262,7 +266,7 @@ func startXContainer(opts xOptions) (display string, started bool, err error) {
 	// A container left behind by an earlier run whose display is gone.
 	engineRun(engine, "rm", "-f", opts.name)
 
-	image, err := ensureImage(engine, opts)
+	image, err := ensureImage(ctx, engine, opts)
 	if err != nil {
 		return "", false, err
 	}

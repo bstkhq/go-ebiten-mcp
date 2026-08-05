@@ -25,7 +25,16 @@ import (
 // a GIF that looks like the game rather than like 1998. Without ffmpeg only the
 // standard library's fixed palette is left; it is noticeably worse, and a
 // mediocre recording still beats a missing one.
+//
+// Every frame must be the size of the first. ffmpeg is fed a raw stream with the
+// dimensions declared once up front, so a frame of another size does not produce
+// a stretched picture — it shifts everything after it and the rest of the video
+// is diagonal garbage. A window resized mid-recording is the way that happens.
 func (s *Server) saveVideo(ctx context.Context, frames []*Frame, format string) (*Artifact, error) {
+	if err := sameSize(frames); err != nil {
+		return nil, err
+	}
+
 	if len(frames) == 0 {
 		return nil, fmt.Errorf("nothing to encode")
 	}
@@ -51,6 +60,23 @@ func (s *Server) saveVideo(ctx context.Context, frames []*Frame, format string) 
 	default:
 		return nil, fmt.Errorf("unknown video format %q: mp4 or gif", format)
 	}
+}
+
+// sameSize rejects a recording that changed shape part way through.
+func sameSize(frames []*Frame) error {
+	if len(frames) == 0 {
+		return nil
+	}
+
+	want := frames[0].Image.Bounds()
+	for i, f := range frames {
+		if got := f.Image.Bounds(); got != want {
+			return fmt.Errorf("frame %d is %v and the first is %v; the video is a raw stream "+
+				"with one size declared up front, so a recording across a resize cannot be "+
+				"encoded. Record again without resizing the window", i, got, want)
+		}
+	}
+	return nil
 }
 
 func (s *Server) encodeWithFFmpeg(ctx context.Context, frames []*Frame, format string) (*Artifact, error) {
