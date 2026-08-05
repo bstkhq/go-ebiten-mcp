@@ -43,3 +43,23 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(data)
 }
+
+// TestTheExportedNamesSayWhatTheyAre.
+//
+// Four constants are aliases of internal/wire, so that the game and the
+// launcher cannot disagree about a variable name. The cost is that godoc shows
+// `const AddrEnv = wire.AddrEnv` and never the string, which leaves a reader
+// with nothing to set. The documentation spells the value out instead, and this
+// is what stops the two drifting apart.
+func TestTheExportedNamesSayWhatTheyAre(t *testing.T) {
+	for _, c := range []struct{ name, got, want string }{
+		{"AddrEnv", AddrEnv, "EBITEN_MCP_ADDR"},
+		{"CaptureEnv", CaptureEnv, "EBITEN_MCP_CAPTURE"},
+		{"RendererEnv", RendererEnv, "EBITENMCP_RENDERER"},
+		{"Path", Path, "/mcp"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s is %q; the documentation says %q", c.name, c.got, c.want)
+		}
+	}
+}

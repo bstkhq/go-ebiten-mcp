@@ -79,7 +79,7 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 	// everything would drop somebody else's.
 	held := map[ebiten.Key]bool{}
 	defer func() {
-		inj := s.rt.Injector()
+		inj := s.rt.inject()
 		for k := range held {
 			inj.KeyUp(k)
 		}
@@ -144,7 +144,7 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 
 // runStep performs one step and returns the frame if it asked for one.
 func (s *Server) runStep(ctx context.Context, step scriptStep, held map[ebiten.Key]bool) (*Frame, error) {
-	inj := s.rt.Injector()
+	inj := s.rt.inject()
 
 	for _, name := range step.Release {
 		keys, err := parseKeys([]string{name})

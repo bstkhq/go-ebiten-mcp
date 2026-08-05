@@ -134,7 +134,7 @@ func (s *Server) key(ctx context.Context, _ *mcpsdk.CallToolRequest, in keyInput
 		return nil, InputOutput{}, err
 	}
 
-	inj := s.rt.Injector()
+	inj := s.rt.inject()
 
 	switch {
 	case in.Release:
@@ -289,7 +289,7 @@ func (s *Server) applyMouse(ctx context.Context, in mouseAction) (InputOutput, e
 		return InputOutput{}, err
 	}
 
-	inj := s.rt.Injector()
+	inj := s.rt.inject()
 	var out InputOutput
 
 	if in.Release {
@@ -356,7 +356,7 @@ func (s *Server) applyMouse(ctx context.Context, in mouseAction) (InputOutput, e
 // Shared with game_script, which had its own copy of the same three lines and
 // its own way of putting the button back on failure.
 func (s *Server) click(ctx context.Context, button ebiten.MouseButton) error {
-	inj := s.rt.Injector()
+	inj := s.rt.inject()
 
 	clickCtx, cancel := withTimeout(ctx)
 	defer cancel()
@@ -394,7 +394,7 @@ func (s *Server) drag(ctx context.Context, x0, y0, x1, y1 float64, button ebiten
 		steps = 10
 	}
 
-	inj := s.rt.Injector()
+	inj := s.rt.inject()
 
 	dragCtx, cancel := tickBudget(ctx, 2*(steps+4))
 	defer cancel()
@@ -474,7 +474,7 @@ func (s *Server) applyTouches(points []touchPoint) {
 		touches = append(touches, hook.Touch{ID: t.ID, X: t.X, Y: t.Y})
 	}
 
-	s.rt.Injector().SetTouches(touches)
+	s.rt.inject().SetTouches(touches)
 }
 
 // ---------------------------------------------------------------------------

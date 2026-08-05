@@ -1157,3 +1157,56 @@ func TestInputStateSeesWhatWasInjected(t *testing.T) {
 		t.Errorf("the cursor reads as %+v, want 12,34", out.Cursor)
 	}
 }
+
+// TestTheExportedInjectorReachesTheGame.
+//
+// Runtime.Injector used to hand back *hook.Injector, a type from an internal
+// package: usable, since the methods come with the value, but a reader of the
+// documentation lands on a type they cannot open and a caller cannot name it in
+// a signature of their own. It is a type of this package now, and this is the
+// check that the wrapper actually wraps — a method that forwarded to nothing
+// would look identical from outside.
+func TestTheExportedInjectorReachesTheGame(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := testRT.InputError(); err != nil {
+		t.Skipf("input injection is unavailable here: %v", err)
+	}
+
+	inj := testRT.Injector()
+	inj.ReleaseAll()
+	t.Cleanup(inj.ReleaseAll)
+
+	inj.KeyDown(ebiten.KeyB)
+	inj.MouseDown(ebiten.MouseButtonRight)
+	inj.MoveCursor(70, 90)
+	inj.SetTouches([]Touch{{ID: 4, X: 11, Y: 22}})
+
+	if err := testRT.WaitTicks(ctx, 2); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+
+	_, out, err := s.inputState(ctx, nil, emptyInput{})
+	if err != nil {
+		t.Fatalf("game_input_state: %v", err)
+	}
+
+	if !contains(out.KeysPressed, "B") {
+		t.Errorf("the key reads as %v", out.KeysPressed)
+	}
+	if !contains(out.MouseButtons, "right") {
+		t.Errorf("the button reads as %v", out.MouseButtons)
+	}
+	if out.Cursor != (Point{X: 70, Y: 90}) {
+		t.Errorf("the cursor reads as %+v", out.Cursor)
+	}
+	// The one method that converts rather than forwards, so the one that can be
+	// wrong in a way the others cannot.
+	if len(out.Touches) != 1 || out.Touches[0] != (touchPoint{ID: 4, X: 11, Y: 22}) {
+		t.Errorf("the touches read as %+v", out.Touches)
+	}
+}

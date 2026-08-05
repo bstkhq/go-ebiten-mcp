@@ -19,7 +19,7 @@ import (
 // it. See routes.
 const sessionTimeout = 30 * time.Minute
 
-// Path is the route the MCP endpoint is mounted on.
+// Path is /mcp, the route the MCP endpoint is mounted on.
 const Path = wire.Path
 
 // Server exposes one running game over MCP.

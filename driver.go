@@ -121,7 +121,7 @@ func T(t *testing.T) *Driver {
 	}
 
 	d.rt.Resume()
-	d.rt.Injector().ReleaseAll()
+	d.rt.inject().ReleaseAll()
 
 	ctx, cancel := context.WithTimeout(context.Background(), d.Timeout)
 	defer cancel()
@@ -145,7 +145,7 @@ func T(t *testing.T) *Driver {
 	}
 
 	t.Cleanup(func() {
-		d.rt.Injector().ReleaseAll()
+		d.rt.inject().ReleaseAll()
 		d.rt.Resume()
 	})
 
@@ -165,7 +165,7 @@ func (d *Driver) injector() *hook.Injector {
 	d.t.Helper()
 
 	d.requireInjection()
-	return d.rt.Injector()
+	return d.rt.inject()
 }
 
 // requireInjection is the check on its own, for the two methods that do their

@@ -250,7 +250,7 @@ func (r *Runtime) do(ctx context.Context, queue chan func(), fn func()) error {
 // having done everything right. Draining the commands happens before Apply, so
 // writing from in there is always in time.
 func (r *Runtime) injectEvent(ctx context.Context, fn func(*hook.Injector)) error {
-	return r.Do(ctx, func() { fn(r.Injector()) })
+	return r.Do(ctx, func() { fn(r.inject()) })
 }
 
 // CommandPanic is what a caller gets when the work it asked to run inside the
@@ -385,9 +385,14 @@ func (r *Runtime) Crash() *Crash {
 	return r.crash
 }
 
-// Injector is the handle used to synthesise input. It is nil-safe to use even
-// when injection is unavailable; InputError says why nothing happens.
-func (r *Runtime) Injector() *hook.Injector {
+// Injector is the handle used to synthesise input. It does nothing when
+// injection is unavailable; InputError says why.
+func (r *Runtime) Injector() Injector { return Injector{r.inject()} }
+
+// inject is the same handle without the wrapper, for the code in this package
+// that needs the whole thing — the queue's Apply and Idle, and the touch and
+// rune types the tools already hold.
+func (r *Runtime) inject() *hook.Injector {
 	return r.injector
 }
 
