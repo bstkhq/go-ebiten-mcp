@@ -1,2 +1,9 @@
 .bin/
 .ebitenmcp/
+
+# What `ebitenmcp call` writes when --out is left at the working directory. It
+# is named after the tool, so the pattern has to be, or the next one lands in a
+# commit the way game_record-0.png did.
+game_*-[0-9].png
+game_*-[0-9].gif
+game_*-[0-9].mp4

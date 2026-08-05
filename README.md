@@ -109,11 +109,12 @@ screen, and the reason is measured rather than assumed. On a 480x320 game in a
 | switched off again | 283 µs |
 
 Reading pixels back is a synchronisation point with the GPU, and the final screen
-is the size of the window rather than the logical resolution — twelve times the
-bytes here, through the encoder, for every frame kept. A screenshot pays that
-once and it does not matter; a buffer running for ten minutes pays it thirty-six
-thousand times. Nothing at all is paid while nobody is capturing, which is the
-line that matters for a game in production with the address left set.
+is the size of the window rather than the logical resolution — four times the
+pixels in that measurement, and the scale factor squared in general, so around
+thirteen for a 480x320 game filling a 1080p screen. A screenshot pays it once and
+it does not matter; a buffer running for ten minutes pays it thirty-six thousand
+times. Nothing at all is paid while nobody is capturing, which is the line that
+matters for a game in production with the address left set.
 
 **Ask it things.** `game_inspect` walks the game's own state by path,
 *including unexported fields*, because a Go game keeps almost everything
@@ -258,7 +259,7 @@ to that environment rather than to the repository at large.
 
 ## The example
 
-`examples/playground` is the test bed: six screens, each stressing one part of
+`examples/playground` is the test bed: seven screens, each stressing one part of
 the system, including a screen with a slider that sinks the framerate, a panic
 button and a button that blocks `Update` for three seconds. Those last two are
 not decoration — the behaviour that matters most is what happens when the game

@@ -32,9 +32,6 @@ type Gamepads struct {
 // GamepadProfile describes the controller to pretend to be.
 type GamepadProfile = uinput.Profile
 
-// GamepadAxis is one analogue control of such a controller.
-type GamepadAxis = uinput.Axis
-
 // DefaultGamepadProfile is an Xbox 360 pad, which Ebitengine's controller
 // database has a complete standard-layout mapping for.
 func DefaultGamepadProfile() GamepadProfile { return uinput.Xbox360() }

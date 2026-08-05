@@ -11,6 +11,7 @@
 //	4 Touch   several simultaneous touches with their ids
 //	5 Form    typed runes, which reach the game by a different path than keys
 //	6 Stress  a framerate you can sink, a panic button and a blocking update
+//	7 Pad     a virtual gamepad's buttons and axes, as the game sees them
 //
 // F toggles a CRT pass drawn in DrawFinalScreen, which is the one thing that
 // exists in what the player sees and not in what the game's own Draw produced.
@@ -36,6 +37,23 @@ func main() {
 	ebiten.SetWindowTitle("go-ebiten-mcp playground")
 
 	game := NewGame()
+
+	// A named view of the game, published for game_inspect to fetch as
+	// "@summary". Walking the tree by path answers "what is this field"; this
+	// answers "what is going on", which is a different question and one only the
+	// game can answer — the screen's name, and where the player is, are computed
+	// here and stored nowhere.
+	ebitenmcp.RegisterState("summary", func() any {
+		return map[string]any{
+			"screen": screenNames[game.current],
+			"tick":   game.ticks,
+			"crt":    game.crt,
+			"player": map[string]float64{
+				"x": game.screens.player.pos.x,
+				"y": game.screens.player.pos.y,
+			},
+		}
+	})
 
 	// The one line. Without EBITEN_MCP_ADDR this is ebiten.RunGame and nothing
 	// else: no socket, no goroutines.
