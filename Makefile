@@ -18,10 +18,15 @@ build:
 	go build ./...
 	go vet ./...
 
-# The escape hatch has to keep compiling or it is not an escape hatch.
-.PHONY: build-nohook
-build-nohook:
+# The escape hatch, which has to keep working and not merely keep compiling.
+# Building it only ever proved it linked, and under it the suite was red: the
+# driver refused to start a test at all when it could not inject, so a game that
+# had dropped injection to build against a new Ebitengine also lost the tests
+# that never touched a key. Everything not made of input has to pass here.
+.PHONY: test-nohook
+test-nohook:
 	go build -tags ebitenmcp_nohook ./...
+	$(RUN) -- go test -count=1 -tags ebitenmcp_nohook ./...
 
 .PHONY: test
 test:

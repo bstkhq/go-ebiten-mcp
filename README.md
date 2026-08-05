@@ -397,6 +397,9 @@ guard it, in the order they fire:
 3. `-tags ebitenmcp_nohook` drops the linkname and the mirror entirely. The game
    still builds and runs and loses only input injection, so an Ebitengine
    release this module has not been checked against can never block a build.
+   Tests keep working too: a driver test that presses a key skips itself and
+   names the tag, and one that only draws and reads still runs, so the golden
+   images survive the escape hatch. `make test-nohook` is that suite.
 
 On legality: the `//go:linkname` restrictions added in Go 1.23 only cover symbols
 defined in the standard library. Reaching into a third-party module is still

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bstkhq/go-ebiten-mcp/internal/hook"
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -133,8 +134,14 @@ func T(t *testing.T) *Driver {
 	// what a game expects before anything asks it questions.
 	d.Tick(2)
 
-	if err := d.rt.InputError(); err != nil {
-		t.Fatalf("ebitenmcp: input injection is unavailable: %v", err)
+	// A build that ought to be able to inject and cannot is every test's
+	// problem, so it is reported here, before the test does any work, rather
+	// than at the first key press. A build with injection compiled out is not
+	// the same thing and is not a failure - see injector.
+	if hook.Supported {
+		if err := d.rt.InputError(); err != nil {
+			t.Fatalf("ebitenmcp: input injection is unavailable: %v", err)
+		}
 	}
 
 	t.Cleanup(func() {
@@ -143,6 +150,24 @@ func T(t *testing.T) *Driver {
 	})
 
 	return d
+}
+
+// injector is the driver's way in to input, and so the one place that has to
+// notice this build cannot do any.
+//
+// Compiled out with -tags ebitenmcp_nohook, a test that presses a key is not
+// failing: there is nothing there to fail, and nothing about the game it could
+// be reporting. It is skipped, naming the tag, since that is the one fact that
+// would let somebody put it back. Tests that only draw and read still run,
+// which is most of what the tag is for - a game that had to drop injection to
+// build against a new Ebitengine keeps its golden images.
+func (d *Driver) injector() *hook.Injector {
+	d.t.Helper()
+
+	if !hook.Supported {
+		d.t.Skip("ebitenmcp: this build injects no input (-tags ebitenmcp_nohook)")
+	}
+	return d.rt.Injector()
 }
 
 func (d *Driver) ctx() (context.Context, context.CancelFunc) {
@@ -192,12 +217,12 @@ func (d *Driver) Hold(ticks int, keys ...ebiten.Key) {
 	}
 
 	for _, k := range keys {
-		d.rt.Injector().KeyDown(k)
+		d.injector().KeyDown(k)
 	}
 	d.Tick(ticks)
 
 	for _, k := range keys {
-		d.rt.Injector().KeyUp(k)
+		d.injector().KeyUp(k)
 	}
 	d.Tick(1)
 }
@@ -205,14 +230,14 @@ func (d *Driver) Hold(ticks int, keys ...ebiten.Key) {
 // KeyDown presses keys and leaves them pressed.
 func (d *Driver) KeyDown(keys ...ebiten.Key) {
 	for _, k := range keys {
-		d.rt.Injector().KeyDown(k)
+		d.injector().KeyDown(k)
 	}
 }
 
 // KeyUp releases keys held by KeyDown.
 func (d *Driver) KeyUp(keys ...ebiten.Key) {
 	for _, k := range keys {
-		d.rt.Injector().KeyUp(k)
+		d.injector().KeyUp(k)
 	}
 }
 
@@ -220,7 +245,7 @@ func (d *Driver) KeyUp(keys ...ebiten.Key) {
 func (d *Driver) Type(text string) {
 	d.t.Helper()
 
-	d.rt.Injector().Type([]rune(text))
+	d.injector().Type([]rune(text))
 	d.Tick(1)
 }
 
@@ -228,7 +253,7 @@ func (d *Driver) Type(text string) {
 func (d *Driver) Move(x, y float64) {
 	d.t.Helper()
 
-	d.rt.Injector().MoveCursor(x, y)
+	d.injector().MoveCursor(x, y)
 	d.Tick(1)
 }
 
@@ -242,9 +267,9 @@ func (d *Driver) Click(x, y float64, button ...ebiten.MouseButton) {
 	}
 
 	d.Move(x, y)
-	d.rt.Injector().MouseDown(b)
+	d.injector().MouseDown(b)
 	d.Tick(1)
-	d.rt.Injector().MouseUp(b)
+	d.injector().MouseUp(b)
 	d.Tick(1)
 }
 
@@ -254,18 +279,18 @@ func (d *Driver) Drag(x0, y0, x1, y1 float64, steps int) {
 	d.t.Helper()
 
 	d.Move(x0, y0)
-	d.rt.Injector().MouseDown(ebiten.MouseButtonLeft)
+	d.injector().MouseDown(ebiten.MouseButtonLeft)
 	d.Tick(1)
 
 	// The same line game_mouse walks, from the same function: a test and a tool
 	// that disagreed about where a drag ends would be a difference nobody could
 	// see until one of them failed.
 	for _, at := range dragPath(x0, y0, x1, y1, steps) {
-		d.rt.Injector().MoveCursor(at[0], at[1])
+		d.injector().MoveCursor(at[0], at[1])
 		d.Tick(1)
 	}
 
-	d.rt.Injector().MouseUp(ebiten.MouseButtonLeft)
+	d.injector().MouseUp(ebiten.MouseButtonLeft)
 	d.Tick(1)
 }
 
@@ -273,7 +298,7 @@ func (d *Driver) Drag(x0, y0, x1, y1 float64, steps int) {
 func (d *Driver) Scroll(x, y float64) {
 	d.t.Helper()
 
-	d.rt.Injector().Scroll(x, y)
+	d.injector().Scroll(x, y)
 	d.Tick(1)
 }
 

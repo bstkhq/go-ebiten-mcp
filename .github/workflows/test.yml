@@ -28,9 +28,6 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
 
-      # The escape hatch has to keep compiling, or it is not an escape hatch.
-      - run: go build -tags ebitenmcp_nohook ./...
-
       # This one runs without a display: it is the check that catches a change
       # to the Ebitengine struct internal/hook mirrors, and it is the cheapest
       # thing in the project.
@@ -42,3 +39,8 @@ jobs:
       # from apt, so it takes the local path and never builds a container.
       - name: Suite
         run: make test
+
+      # The escape hatch, run rather than merely built: everything that is not
+      # input injection has to keep passing without it. See the Makefile.
+      - name: Suite without injection
+        run: make test-nohook
