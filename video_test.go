@@ -195,3 +195,109 @@ func TestSaveGIFProducesAGifWithEveryFrameInIt(t *testing.T) {
 		t.Errorf("the gif is %v, want 12x12", got)
 	}
 }
+
+// TestTheAnswerSaysWhichGifItMade.
+//
+// The two things that write a gif do not agree, and until this the answer did
+// not say which had run. With ffmpeg the frames are resampled to 25 a second
+// and most of them are dropped; without it every frame is kept and played at
+// fifty. Same tool, same arguments, different machine — so a golden recorded in
+// CI and one recorded by hand are different files, and a caller recording
+// frames in order to step through them may be handed half of them.
+//
+// Checked against the file rather than against the constant that made it: a
+// count the encoder reports and does not produce is worse than no count.
+func TestTheAnswerSaysWhichGifItMade(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	frames := frameSeq(t, 48, 64, 48)
+
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		art, err := s.saveVideo(ctx, frames, "gif")
+		if err != nil {
+			t.Fatalf("saving a gif with ffmpeg: %v", err)
+		}
+		if art.FPS != gifFPS {
+			t.Errorf("it reports %g frames a second, want %d", art.FPS, gifFPS)
+		}
+		assertGifMatchesItsArtifact(t, art)
+
+		// And the resampling is the whole point of saying so: forty-eight
+		// frames at sixty a second is not forty-eight frames at twenty-five.
+		if art.Frames >= len(frames) {
+			t.Errorf("it kept %d of %d frames, so nothing was resampled", art.Frames, len(frames))
+		}
+	}
+
+	// The other path, on this machine, whatever it has.
+	t.Setenv("PATH", "")
+
+	art, err := s.saveVideo(ctx, frames, "gif")
+	if err != nil {
+		t.Fatalf("saving a gif without ffmpeg: %v", err)
+	}
+	if art.Frames != len(frames) {
+		t.Errorf("it kept %d of %d frames; this path resamples nothing", art.Frames, len(frames))
+	}
+	if art.FPS != 100/fallbackGIFDelay {
+		t.Errorf("it reports %g frames a second, want %d", art.FPS, 100/fallbackGIFDelay)
+	}
+	assertGifMatchesItsArtifact(t, art)
+}
+
+// TestAnMP4KeepsEveryFrameAndSaysSo is the other half of the same promise, and
+// the reason the two formats are not interchangeable: nothing between the
+// recorder and the file drops anything.
+func TestAnMP4KeepsEveryFrameAndSaysSo(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skipf("no ffmpeg here, so there are no mp4s to check: %v", err)
+	}
+
+	frames := frameSeq(t, 12, 64, 48)
+
+	art, err := s.saveVideo(ctx, frames, "mp4")
+	if err != nil {
+		t.Fatalf("saving an mp4: %v", err)
+	}
+	if art.Frames != len(frames) {
+		t.Errorf("it kept %d of %d frames", art.Frames, len(frames))
+	}
+	if art.FPS != rawFPS {
+		t.Errorf("it reports %g frames a second, want %d", art.FPS, rawFPS)
+	}
+}
+
+// assertGifMatchesItsArtifact opens the file and counts, because a recording
+// that describes itself wrongly is worse than one that says nothing: it is the
+// number somebody would compare two runs with.
+func assertGifMatchesItsArtifact(t *testing.T, art *Artifact) {
+	t.Helper()
+
+	data, err := os.ReadFile(art.Path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", art.Path, err)
+	}
+
+	decoded, err := gif.DecodeAll(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("%s does not decode: %v", art.Path, err)
+	}
+
+	if len(decoded.Image) != art.Frames {
+		t.Errorf("it says %d frames and the file holds %d", art.Frames, len(decoded.Image))
+	}
+	if len(decoded.Delay) == 0 {
+		t.Fatal("the gif has no delays, so it plays at whatever speed the viewer decides")
+	}
+	if got := 100 / float64(decoded.Delay[0]); got != art.FPS {
+		t.Errorf("it says %g frames a second and the file plays at %g", art.FPS, got)
+	}
+}

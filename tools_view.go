@@ -225,7 +225,7 @@ type recordInput struct {
 	Every   int    `json:"every,omitempty" jsonschema:"keep one frame out of every N captured; defaults to 1"`
 	Columns int    `json:"columns,omitempty" jsonschema:"columns in the contact sheet; defaults to 4"`
 	Cells   int    `json:"cells,omitempty" jsonschema:"how many frames to put in the contact sheet; defaults to 12"`
-	Format  string `json:"format,omitempty" jsonschema:"mp4 for something to watch, gif for something that plays inline in a README or an issue; defaults to mp4"`
+	Format  string `json:"format,omitempty" jsonschema:"mp4 for something to watch, gif for something that plays inline in a README or an issue; defaults to mp4. An mp4 keeps every frame recorded; a gif is resampled to 25 a second, so it covers the same time with fewer of them. The answer says which you got"`
 	Inline  string `json:"inline,omitempty" jsonschema:"what to return in the reply: 'sheet' for a grid of frames with their ticks, or 'gif' for the animation itself, which some clients play and some show as a single frame; defaults to sheet"`
 	NoVideo bool   `json:"no_video,omitempty" jsonschema:"skip writing the video file and only produce the contact sheet"`
 	MaxSize int    `json:"max_size,omitempty" jsonschema:"longest side of the inline contact sheet in pixels; defaults to 1024. The file on disk is always full resolution"`
@@ -306,7 +306,7 @@ func (s *Server) attachVideo(ctx context.Context, frames []*Frame, format string
 
 	out.Video = video
 
-	note := "\nvideo: " + video.Path
+	note := fmt.Sprintf("\nvideo: %s (%d frames at %g a second)", video.Path, video.Frames, video.FPS)
 	if video.URL != "" {
 		note += "\n" + video.URL
 	}

@@ -14,6 +14,21 @@ import (
 	"strconv"
 )
 
+// How the frames are played back, in one place rather than spelled into an
+// ffmpeg filter string and a gif delay that nobody would think to compare.
+//
+// rawFPS is what the frames are declared at going in: one Draw per frame, and
+// the recorder does not know how long each took, so a nominal 60 is as true as
+// anything available. gifFPS is what a gif comes out at, which is lower on
+// purpose — a gif carries its own palette and no motion compression, so twice
+// the frames is roughly twice the file. fallbackGIFDelay is the one the pure-Go
+// encoder writes instead, in hundredths of a second.
+const (
+	rawFPS           = 60
+	gifFPS           = 25
+	fallbackGIFDelay = 2
+)
+
 // saveVideo writes the recording as a file a person can watch.
 //
 // The format is worth choosing rather than defaulting. H.264 keeps the game's
@@ -89,7 +104,7 @@ func (s *Server) encodeWithFFmpeg(ctx context.Context, frames []*Frame, format s
 		"-f", "rawvideo",
 		"-pix_fmt", "rgba",
 		"-s", strconv.Itoa(b.Dx()) + "x" + strconv.Itoa(b.Dy()),
-		"-r", "60",
+		"-r", strconv.Itoa(rawFPS),
 		"-i", "-",
 	}
 
@@ -99,7 +114,8 @@ func (s *Server) encodeWithFFmpeg(ctx context.Context, frames []*Frame, format s
 		// looks like the game; the standard 216-colour web palette does not.
 		args = append(args,
 			"-filter_complex",
-			"[0:v] fps=25,split [a][b];[a] palettegen=stats_mode=diff [p];[b][p] paletteuse=dither=bayer:bayer_scale=3")
+			fmt.Sprintf("[0:v] fps=%d,split [a][b];[a] palettegen=stats_mode=diff [p];"+
+				"[b][p] paletteuse=dither=bayer:bayer_scale=3", gifFPS))
 	} else {
 		args = append(args,
 			// yuv420p is what every player can decode, and it insists on even
@@ -143,12 +159,23 @@ func (s *Server) encodeWithFFmpeg(ctx context.Context, frames []*Frame, format s
 		return nil, err
 	}
 
+	// What came out, not what went in. A gif is resampled by the filter above,
+	// so the count and the rate both change and the caller is entitled to know
+	// by how much rather than assume it got what it asked for.
+	kept, rate := len(frames), float64(rawFPS)
+	if format == "gif" {
+		rate = gifFPS
+		kept = len(frames) * gifFPS / rawFPS
+	}
+
 	art := &Artifact{
 		Path:   path,
 		Kind:   format,
 		Width:  b.Dx(),
 		Height: b.Dy(),
 		Bytes:  int(info.Size()),
+		Frames: kept,
+		FPS:    rate,
 	}
 	if s.media.baseURL != "" {
 		art.URL = s.media.baseURL + "/media/" + name
@@ -165,7 +192,7 @@ func (s *Server) saveGIF(frames []*Frame) (*Artifact, error) {
 		draw.FloydSteinberg.Draw(p, p.Bounds(), f.Image, f.Image.Bounds().Min)
 
 		out.Image = append(out.Image, p)
-		out.Delay = append(out.Delay, 2) // hundredths of a second, so ~50fps
+		out.Delay = append(out.Delay, fallbackGIFDelay)
 	}
 
 	var buf bytes.Buffer
@@ -173,5 +200,15 @@ func (s *Server) saveGIF(frames []*Frame) (*Artifact, error) {
 		return nil, fmt.Errorf("encoding gif: %w", err)
 	}
 
-	return s.media.save("rec", "gif", buf.Bytes(), b.Dx(), b.Dy())
+	art, err := s.media.save("rec", "gif", buf.Bytes(), b.Dx(), b.Dy())
+	if err != nil {
+		return nil, err
+	}
+
+	// Every frame, and faster than the ffmpeg path plays them. Nothing here
+	// resamples, so this is the count that went in.
+	art.Frames = len(frames)
+	art.FPS = 100 / fallbackGIFDelay
+
+	return art, nil
 }

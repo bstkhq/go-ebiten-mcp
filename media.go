@@ -35,6 +35,17 @@ type Artifact struct {
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
 	Bytes  int    `json:"bytes"`
+
+	// Frames and FPS describe a recording, and are left out of everything else.
+	//
+	// They are here because the answer would otherwise not say, and the two
+	// things that write a gif do not agree: with ffmpeg the frames are
+	// resampled and roughly half of them are dropped, without it every one is
+	// kept and played twice as fast. Same tool, same arguments, different
+	// machine. A caller comparing two recordings, or recording frames in order
+	// to step through them, needs to know which of those it got.
+	Frames int     `json:"frames,omitempty"`
+	FPS    float64 `json:"fps,omitempty"`
 }
 
 var artifactSeq atomic.Uint64
