@@ -3,6 +3,7 @@ package ebitenmcp
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -99,33 +100,47 @@ func TestWaitToolReturnsWhenTheValueArrives(t *testing.T) {
 // whether it took effect must not be made to wait a tick to be told yes. The
 // same ordering is what puts one more read than there are ticks in the budget,
 // so a value arriving on the last one still counts.
+//
+// It costs two ticks — one read to record what the value was, for changed, and
+// one inside the loop to test it, each a round trip into the loop. Moving the
+// wait ahead of the read makes it three. That is a one-tick difference, and a
+// one-tick difference is not something a single measurement can be trusted on:
+// under -race a tick occasionally takes long enough to add one, about once in
+// twelve here, which is a test that fails for no reason anybody can act on.
+//
+// The cheapest of several attempts is the honest way to keep the precision. A
+// slow tick can only ever add, so the minimum is the real cost, and the wrong
+// ordering has no run that reaches two.
 func TestWaitToolAnswersAtOnceWhenItIsAlreadyTrue(t *testing.T) {
-	game := reset(t)
 	s := newTestServer(t)
 
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	game.mu.Lock()
-	game.still = true
-	game.mu.Unlock()
-
 	want := "true"
+	cheapest := int64(math.MaxInt64)
 
-	// A budget far larger than the answer needs, so that returning quickly means
-	// it looked before waiting rather than that it had no room to wait.
-	before := testRT.Tick()
-	if _, _, err := s.wait(ctx, nil, waitInput{Path: "still", Equals: &want, Timeout: 120}); err != nil {
-		t.Fatalf("a value that was already true timed out: %v", err)
+	for i := 0; i < 5; i++ {
+		game := reset(t)
+
+		game.mu.Lock()
+		game.still = true
+		game.mu.Unlock()
+
+		// A budget far larger than the answer needs, so that returning quickly
+		// means it looked before waiting rather than that it had no room to wait.
+		before := testRT.Tick()
+		if _, _, err := s.wait(ctx, nil, waitInput{Path: "still", Equals: &want, Timeout: 120}); err != nil {
+			t.Fatalf("a value that was already true timed out: %v", err)
+		}
+
+		if waited := testRT.Tick() - before; waited < cheapest {
+			cheapest = waited
+		}
 	}
 
-	// Two ticks, exactly, and measured rather than guessed: one read to record
-	// what the value was, for changed, and one inside the loop to test it, each
-	// costing a round trip into the loop. Moving the wait ahead of the read
-	// makes it three, every time — which is what this number is here to catch,
-	// so the slack that would make it comfortable would also make it useless.
-	if waited := testRT.Tick() - before; waited > 2 {
-		t.Errorf("it took %d ticks to report something that was true when it was asked", waited)
+	if cheapest > 2 {
+		t.Errorf("the quickest of five answers about something already true took %d ticks", cheapest)
 	}
 
 	reset(t)
