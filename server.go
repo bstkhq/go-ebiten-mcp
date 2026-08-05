@@ -135,6 +135,7 @@ func (s *Server) mcp() *mcpsdk.Server {
 	s.addLoopTools(srv)
 	s.addStateTools(srv)
 	s.addInputTools(srv)
+	s.addGamepadTools(srv)
 
 	return srv
 }

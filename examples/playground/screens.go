@@ -418,3 +418,93 @@ func touchColor(id int) color.RGBA {
 	}
 	return palette[((id%len(palette))+len(palette))%len(palette)]
 }
+
+// ---------------------------------------------------------------------------
+// 7 pad — a controller that is not there
+// ---------------------------------------------------------------------------
+
+// gamepadScreen shows what the game sees of a controller, which is the only way
+// to check at a glance that an injected press actually arrived. It reads the
+// standard layout, because that is what a game written for "any pad" uses, and
+// shows the SDL id, because that is what a game switches on to decide what kind
+// of controller it is holding.
+type gamepadScreen struct {
+	connected []ebiten.GamepadID
+	presses   int
+}
+
+func newGamepadScreen() *gamepadScreen { return &gamepadScreen{} }
+
+var padButtons = []struct {
+	name   string
+	button ebiten.StandardGamepadButton
+}{
+	{"A", ebiten.StandardGamepadButtonRightBottom},
+	{"B", ebiten.StandardGamepadButtonRightRight},
+	{"X", ebiten.StandardGamepadButtonRightLeft},
+	{"Y", ebiten.StandardGamepadButtonRightTop},
+	{"LB", ebiten.StandardGamepadButtonFrontTopLeft},
+	{"RB", ebiten.StandardGamepadButtonFrontTopRight},
+	{"back", ebiten.StandardGamepadButtonCenterLeft},
+	{"start", ebiten.StandardGamepadButtonCenterRight},
+	{"up", ebiten.StandardGamepadButtonLeftTop},
+	{"down", ebiten.StandardGamepadButtonLeftBottom},
+	{"left", ebiten.StandardGamepadButtonLeftLeft},
+	{"right", ebiten.StandardGamepadButtonLeftRight},
+}
+
+func (s *gamepadScreen) update(*Game) error {
+	s.connected = ebiten.AppendGamepadIDs(s.connected[:0])
+
+	for _, id := range s.connected {
+		for _, b := range padButtons {
+			if inpututil.IsStandardGamepadButtonJustPressed(id, b.button) {
+				s.presses++
+			}
+		}
+	}
+	return nil
+}
+
+func (s *gamepadScreen) draw(dst *ebiten.Image) {
+	if len(s.connected) == 0 {
+		ebitenutil.DebugPrintAt(dst, "no gamepad connected", 24, headerHeight+30)
+		return
+	}
+
+	id := s.connected[0]
+
+	ebitenutil.DebugPrintAt(dst, fmt.Sprintf("%s\n%s   standard layout: %v   edges seen: %d",
+		ebiten.GamepadName(id), ebiten.GamepadSDLID(id),
+		ebiten.IsStandardGamepadLayoutAvailable(id), s.presses), 8, headerHeight+8)
+
+	for i, b := range padButtons {
+		x := float32(16 + (i%6)*76)
+		y := float32(headerHeight + 46 + (i/6)*30)
+
+		colour := colDim
+		if ebiten.IsStandardGamepadButtonPressed(id, b.button) {
+			colour = colAccent
+		}
+		vector.DrawFilledRect(dst, x, y, 68, 22, colour, false)
+		ebitenutil.DebugPrintAt(dst, b.name, int(x)+6, int(y)+7)
+	}
+
+	// Sticks, drawn where they are pushed, so a screenshot shows the direction.
+	for i, stick := range []struct {
+		label  string
+		x, y   ebiten.StandardGamepadAxis
+		centre [2]float32
+	}{
+		{"left", ebiten.StandardGamepadAxisLeftStickHorizontal, ebiten.StandardGamepadAxisLeftStickVertical, [2]float32{130, 250}},
+		{"right", ebiten.StandardGamepadAxisRightStickHorizontal, ebiten.StandardGamepadAxisRightStickVertical, [2]float32{330, 250}},
+	} {
+		dx := float32(ebiten.StandardGamepadAxisValue(id, stick.x)) * 34
+		dy := float32(ebiten.StandardGamepadAxisValue(id, stick.y)) * 34
+
+		vector.StrokeCircle(dst, stick.centre[0], stick.centre[1], 38, 1, colDim, true)
+		vector.DrawFilledCircle(dst, stick.centre[0]+dx, stick.centre[1]+dy, 12, colAccent, true)
+		ebitenutil.DebugPrintAt(dst, stick.label, int(stick.centre[0])-14, int(stick.centre[1])+44)
+		_ = i
+	}
+}

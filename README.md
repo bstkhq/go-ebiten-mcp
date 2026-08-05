@@ -51,8 +51,8 @@ or an issue. A client that animates gifs can have one back directly, with
 `inline: "gif"`. `game_compare` puts a before, an after and their difference in one
 image.
 
-**Drive it.** `game_key`, `game_type`, `game_mouse` and `game_touch` synthesise
-input the game cannot tell from the real thing: held keys have durations, drags
+**Drive it.** `game_key`, `game_type`, `game_mouse`, `game_touch` and
+`game_gamepad` synthesise input the game cannot tell from the real thing: held keys have durations, drags
 follow a path across ticks, several touches exist at once, typed text arrives as
 characters rather than key presses. Each takes `then_wait_ticks` and
 `then_screenshot`, so press-wait-look is one call rather than three.
@@ -205,6 +205,53 @@ ebitenmcp call game_key '{"keys":["arrowdown"],"then_screenshot":true}'
 
 `cmd/ebitenmcp` is a small client for a shell or a CI job, for when speaking the
 protocol is not worth it.
+
+## Gamepads are real devices
+
+`game_gamepad` does not fake a controller inside Ebitengine — it asks the kernel
+for one, through `/dev/uinput`, and Ebitengine finds it the way it finds a
+controller somebody plugged in. Everything downstream behaves accordingly: the
+SDL id, the standard-layout mapping, `inpututil`'s edges.
+
+The identity is yours to choose, and that is the point rather than a flourish.
+Games routinely decide what a controller *is* from its vendor id, so one that
+could only claim to be an Xbox pad would send those games down a different path
+than their own hardware and prove nothing:
+
+```json
+{"connect": {"name": "Advanced Gamepad", "vendor": "0x2a", "product": "0x01"}}
+{"buttons": {"a": true}, "axes": {"leftx": -1.0}, "dpad": "right"}
+```
+
+The default profile is an Xbox 360 pad, whose id Ebitengine's controller database
+has a complete mapping for, so the standard buttons work without writing one.
+Note that a known identity also takes its *name* from that database — you cannot
+rename a controller the database recognises.
+
+Two limits worth knowing before they surprise you.
+
+It is **Linux only**. A virtual input device is an operating system's own
+business: Windows would need the ViGEmBus driver installed, and macOS a DriverKit
+extension. Nothing else in this library is affected — keyboard, mouse and touch
+work wherever Ebitengine does.
+
+And a uinput device is **not a USB device**. It has no USB descriptors, so no
+manufacturer or serial, and nothing enumerating USB will find it. That matters
+only for a game that talks to its controller twice — once through Ebitengine and
+once directly over USB HID for whatever else the hardware does. For one of those,
+pick a vendor the game does not treat specially and everything input-related
+still works.
+
+It needs write access to `/dev/uinput` and read access to `/dev/input/event*`,
+which are usually root-only:
+
+```sh
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
+  | sudo tee /etc/udev/rules.d/99-uinput.rules
+sudo gpasswd -a "$USER" input
+```
+
+Without them the gamepad tools say so and the tests skip; nothing else changes.
 
 ## How the input injection works, and what that costs
 

@@ -424,9 +424,37 @@ func (s *Server) inputState(ctx context.Context, _ *mcpsdk.CallToolRequest, _ em
 			touches = append(touches, touchPoint{ID: int(id), X: x, Y: y})
 		}
 
+		var gamepads []map[string]any
+		for _, id := range ebiten.AppendGamepadIDs(nil) {
+			var buttons []int
+			for b := 0; b < ebiten.GamepadButtonCount(id); b++ {
+				if ebiten.IsGamepadButtonPressed(id, ebiten.GamepadButton(b)) {
+					buttons = append(buttons, b)
+				}
+			}
+
+			var axes []float64
+			for a := 0; a < ebiten.GamepadAxisCount(id); a++ {
+				axes = append(axes, ebiten.GamepadAxisValue(id, a))
+			}
+
+			// The SDL id is here because it is what a game switches on to decide
+			// what kind of controller this is, so seeing it is often the answer
+			// to "why is the game ignoring my gamepad".
+			gamepads = append(gamepads, map[string]any{
+				"id":              int(id),
+				"name":            ebiten.GamepadName(id),
+				"sdl_id":          ebiten.GamepadSDLID(id),
+				"standard_layout": ebiten.IsStandardGamepadLayoutAvailable(id),
+				"buttons_pressed": buttons,
+				"axes":            axes,
+			})
+		}
+
 		cx, cy := ebiten.CursorPosition()
 		wx, wy := ebiten.Wheel()
 
+		out["gamepads"] = gamepads
 		out["keys_pressed"] = pressed
 		out["mouse_buttons"] = buttons
 		out["cursor"] = map[string]int{"x": cx, "y": cy}

@@ -80,7 +80,8 @@ type Runtime struct {
 	captures  []chan *Frame
 	lastFrame *Frame
 
-	server *Server
+	server   *Server
+	gamepads *Gamepads
 }
 
 // Server returns the MCP server serving this game, or nil when none was
@@ -92,8 +93,20 @@ func (r *Runtime) Server() *Server {
 	return r.server
 }
 
-// Close stops the MCP server. The game is untouched.
+// Close stops the MCP server and unplugs any virtual controllers. The game is
+// untouched.
+//
+// The controllers matter here: a uinput device outlives the process that made
+// it, so leaving without destroying them leaves phantom gamepads on the machine.
 func (r *Runtime) Close() error {
+	r.mu.Lock()
+	gamepads := r.gamepads
+	r.mu.Unlock()
+
+	if gamepads != nil {
+		gamepads.Close()
+	}
+
 	if s := r.Server(); s != nil {
 		return s.Close()
 	}

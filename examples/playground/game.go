@@ -26,10 +26,11 @@ const (
 	screenTouch
 	screenForm
 	screenStress
+	screenGamepad
 	screenCount
 )
 
-var screenNames = [screenCount]string{"menu", "player", "paint", "touch", "form", "stress"}
+var screenNames = [screenCount]string{"menu", "player", "paint", "touch", "form", "stress", "pad"}
 
 var (
 	colBackground = color.RGBA{R: 0x14, G: 0x17, B: 0x1f, A: 0xff}
@@ -55,12 +56,13 @@ type Game struct {
 	ticks   int
 
 	screens struct {
-		menu   *menuScreen
-		player *playerScreen
-		paint  *paintScreen
-		touch  *touchScreen
-		form   *formScreen
-		stress *stressScreen
+		menu    *menuScreen
+		player  *playerScreen
+		paint   *paintScreen
+		touch   *touchScreen
+		form    *formScreen
+		stress  *stressScreen
+		gamepad *gamepadScreen
 	}
 }
 
@@ -75,6 +77,7 @@ func NewGame() *Game {
 	g.screens.touch = newTouchScreen()
 	g.screens.form = newFormScreen()
 	g.screens.stress = newStressScreen()
+	g.screens.gamepad = newGamepadScreen()
 
 	return g
 }
@@ -120,6 +123,8 @@ func (g *Game) screen() screen {
 		return g.screens.form
 	case screenStress:
 		return g.screens.stress
+	case screenGamepad:
+		return g.screens.gamepad
 	default:
 		return g.screens.menu
 	}
