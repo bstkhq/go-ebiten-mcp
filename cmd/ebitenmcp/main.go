@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/bstkhq/go-ebiten-mcp/internal/wire"
@@ -271,28 +272,36 @@ func find() error {
 	}
 
 	for _, entry := range entries {
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		path := filepath.Join(dir, entry.Name())
+
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 
-		var d struct {
-			Name string `json:"name"`
-			PID  int    `json:"pid"`
-			URL  string `json:"url"`
-			CWD  string `json:"cwd"`
-		}
+		var d wire.Discovery
 		if err := json.Unmarshal(data, &d); err != nil {
 			continue
 		}
 
-		alive := " (gone)"
-		if process, err := os.FindProcess(d.PID); err == nil && process.Signal(nil) == nil {
-			alive = ""
+		// A game that was killed rather than stopped cannot tidy up after
+		// itself, so its file stays. Since this already works out that the
+		// process is gone, it may as well take it away: a directory that only
+		// ever grows fills with names of things that no longer exist, and then
+		// the list nobody trusts is the one this command prints.
+		if !running(d.PID) {
+			os.Remove(path)
+			continue
 		}
-		fmt.Printf("%-16s pid %-8d %s%s\n    %s\n", d.Name, d.PID, d.URL, alive, d.CWD)
+
+		fmt.Printf("%-16s pid %-8d %s\n    %s\n", d.Name, d.PID, d.URL, d.CWD)
 	}
 	return nil
+}
+
+func running(pid int) bool {
+	process, err := os.FindProcess(pid)
+	return err == nil && process.Signal(syscall.Signal(0)) == nil
 }
 
 // extensionFor names a file after what is actually in it. Writing a gif as
