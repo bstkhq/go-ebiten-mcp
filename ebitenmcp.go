@@ -12,11 +12,6 @@ import (
 // a release build costs nothing.
 const AddrEnv = "EBITEN_MCP_ADDR"
 
-// WriteEnv gates the tools that change game state. Reading a game is harmless;
-// writing to it from outside is not something a shipped build should allow by
-// accident.
-const WriteEnv = "EBITEN_MCP_WRITE"
-
 // Options configures a wrapped game.
 type Options struct {
 	// Addr is the address the MCP server listens on. Defaults to
@@ -30,9 +25,6 @@ type Options struct {
 	// use to start over. Without it there is nothing to reset to, since
 	// Ebitengine's loop cannot be restarted.
 	Factory func() ebiten.Game
-
-	// AllowWrite enables the state-changing tools. Defaults to EBITEN_MCP_WRITE.
-	AllowWrite bool
 }
 
 // Option customises Options.
@@ -53,16 +45,10 @@ func WithFactory(factory func() ebiten.Game) Option {
 	return func(o *Options) { o.Factory = factory }
 }
 
-// WithWrite enables or disables the state-changing tools.
-func WithWrite(allow bool) Option {
-	return func(o *Options) { o.AllowWrite = allow }
-}
-
 func newOptions(opts []Option) *Options {
 	o := &Options{
-		Addr:       os.Getenv(AddrEnv),
-		Name:       defaultName(),
-		AllowWrite: os.Getenv(WriteEnv) == "1",
+		Addr: os.Getenv(AddrEnv),
+		Name: defaultName(),
 	}
 	for _, opt := range opts {
 		opt(o)

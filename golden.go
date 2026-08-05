@@ -70,8 +70,21 @@ func UpdateGolden() bool {
 //
 // With -update it writes the file instead, which is how a golden is created and
 // how an intended change is accepted.
+//
+// The game is held still for the capture. Without that, the frame caught is
+// whichever one the loop happened to draw next, and any tick counter, clock or
+// animation on screen lands on a different value each run — which makes the
+// comparison fail sometimes and pass others, and an intermittent golden is
+// worse than none, because it teaches people to ignore it.
 func (d *Driver) Golden(name string) {
 	d.t.Helper()
+
+	paused, _ := d.rt.Paused()
+	if !paused {
+		d.rt.Pause()
+		defer d.rt.Resume()
+	}
+
 	d.GoldenImage(name, d.Screenshot())
 }
 

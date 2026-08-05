@@ -50,8 +50,9 @@ func (s *Server) addStateTools(srv *mcpsdk.Server) {
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name: "game_goroutines",
-		Description: "A goroutine dump. When the loop has stopped answering, this says what it " +
-			"is stuck on.",
+		Description: "A goroutine dump, in full. When the loop has stopped answering, this says " +
+			"what it is stuck on — and unlike game_profile it does not need the Go toolchain, " +
+			"which is what makes it the one to reach for on a deployed machine.",
 		Annotations: readOnly("Goroutines"),
 	}, s.goroutines)
 }
@@ -107,6 +108,7 @@ func (s *Server) state(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*m
 
 		"state_providers": stateProviderNames(),
 		"media_dir":       s.media.dir,
+		"frame_ring":      s.rt.Ring().Status(),
 	}
 
 	if frame := s.rt.LastFrame(); frame != nil {

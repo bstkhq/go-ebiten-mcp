@@ -65,16 +65,42 @@ func (r *Runtime) serveCaptures(screen *ebiten.Image) {
 	r.mu.Lock()
 	waiting := r.captures
 	r.captures = nil
+	ring := r.ring
+	// A crashed game keeps drawing — the wrapper paints the last frame and the
+	// panic over it — and a paused one redraws the same thing forever. Feeding
+	// either to the buffer fills it with identical frames that evict exactly the
+	// ones somebody is about to ask for, which is the opposite of the job.
+	frozen := r.crash != nil || (r.paused && r.steps == 0)
 	r.mu.Unlock()
 
-	if len(waiting) == 0 {
+	keepForRing := ring != nil && !frozen && ring.wants()
+	if len(waiting) == 0 && !keepForRing {
 		return
 	}
 
+	// One read for both. ReadPixels is a synchronisation point with the GPU, so
+	// doing it twice on a frame somebody asked for while the ring is running
+	// would cost the game twice for the same pixels.
 	frame := r.readFrame(screen)
+
 	for _, ch := range waiting {
 		ch <- frame
 	}
+	if keepForRing {
+		ring.offer(frame.Image, frame.Tick)
+	}
+}
+
+// Ring is the retrospective frame buffer, which is off until something asks for
+// it.
+func (r *Runtime) Ring() *frameRing {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.ring == nil {
+		r.ring = newFrameRing()
+	}
+	return r.ring
 }
 
 // keepFrame captures the screen without anyone having asked, which is only

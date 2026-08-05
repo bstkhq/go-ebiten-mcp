@@ -82,6 +82,7 @@ type Runtime struct {
 
 	server   *Server
 	gamepads *Gamepads
+	ring     *frameRing
 }
 
 // Server returns the MCP server serving this game, or nil when none was
@@ -105,6 +106,14 @@ func (r *Runtime) Close() error {
 
 	if gamepads != nil {
 		gamepads.Close()
+	}
+
+	r.mu.Lock()
+	ring := r.ring
+	r.mu.Unlock()
+
+	if ring != nil {
+		ring.Disable()
 	}
 
 	if s := r.Server(); s != nil {

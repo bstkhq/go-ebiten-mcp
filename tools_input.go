@@ -380,17 +380,27 @@ func (s *Server) touch(ctx context.Context, _ *mcpsdk.CallToolRequest, in touchI
 		return nil, nil, err
 	}
 
-	touches := make([]hook.Touch, 0, len(in.Touches))
-	for _, t := range in.Touches {
-		touches = append(touches, hook.Touch{ID: t.ID, X: t.X, Y: t.Y})
+	if err := s.applyTouches(in.Touches); err != nil {
+		return nil, nil, err
 	}
-	s.rt.Injector().SetTouches(touches)
 
 	if in.ThenWaitTicks == 0 {
 		in.ThenWaitTicks = 1
 	}
 
-	return s.finish(ctx, in.afterInput, map[string]any{"touches": len(touches)})
+	return s.finish(ctx, in.afterInput, map[string]any{"touches": len(in.Touches)})
+}
+
+// applyTouches replaces the set of active touches, shared with game_script so
+// the two cannot drift apart.
+func (s *Server) applyTouches(points []touchPoint) error {
+	touches := make([]hook.Touch, 0, len(points))
+	for _, t := range points {
+		touches = append(touches, hook.Touch{ID: t.ID, X: t.X, Y: t.Y})
+	}
+
+	s.rt.Injector().SetTouches(touches)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

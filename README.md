@@ -61,11 +61,26 @@ characters rather than key presses. Each takes `then_wait_ticks` and
 of which can wait on a state path reaching a value, which is what makes a
 sequence deterministic instead of a string of sleeps.
 
+**Repeat it.** `game_script` runs a whole sequence anchored to ticks in one call,
+and hands back a contact sheet of the moments you asked it to capture. Ticks are
+relative to the start, so the same script works whenever it runs — which is what
+makes it something you can paste into an issue.
+
+**See what led up to it.** `game_record` captures what comes next, which only
+helps with a bug you already know how to reproduce. `game_frames` keeps a rolling
+buffer so the frames *before* a crash are still there when you think to ask. It
+is off by default: enable it, let it run, then ask. Measured on a 480x320 game it
+costs nothing detectable, and the cost scales with resolution, so the buffer
+reports what it is using and how many frames it had to drop.
+
 **Ask it things.** `game_inspect` walks the game's own state by path,
 *including unexported fields*, because a Go game keeps almost everything
 unexported and an inspector that respected visibility would show empty structs.
 `game_state`, `game_traces` and `game_frametimes` cover the process: framerate,
 memory, what it printed, and what each tick cost split into update and draw.
+`game_profile` goes one further and says *where* the time or the memory went — it
+returns the profile summarised as text, not just a pprof file somebody else would
+have to open.
 
 **And when it breaks.** A panic in the game is caught, recorded with its stack
 and the tick it happened on, and the frame from the moment of the crash is kept.
@@ -105,6 +120,11 @@ GPU or software rasteriser is present and demanding identical bytes turns a
 regression suite into a machine-compatibility suite. A failure writes the
 expected image, what was actually drawn, and a highlighted difference, next to
 the golden.
+
+It also holds the game still for the capture. Otherwise the frame caught is
+whichever the loop drew next, and a tick counter or an animation on screen lands
+somewhere different each run — so the test fails sometimes and passes others,
+which is worse than no test at all.
 
 ## When there is no screen: tests, CI, an agent
 
