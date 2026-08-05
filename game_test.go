@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bstkhq/go-ebiten-mcp/internal/hook"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 )
@@ -237,6 +238,41 @@ func settle(t *testing.T) int64 {
 
 	t.Fatalf("the loop never came to rest after being paused; it is at tick %d", last)
 	return 0
+}
+
+// TestInputInjectionIsAvailable is the loud half of the mirror's defence.
+//
+// hook.Verify writes a pattern through the mirrored struct and reads it back
+// through Ebitengine's public API on the first tick, which is the check that
+// catches a layout that has drifted. But its failure was silent: the error went
+// into Runtime.inputErr, the wrapper simply stopped injecting, and every test
+// that needed input called t.Skipf on it — so a mirror pointing at the wrong
+// offsets produced a green run with some skips in it, which nobody reads.
+//
+// On a build that supports injection, it not working is a failure. That is the
+// whole point of the tag: ebitenmcp_nohook is how you say you do not want this.
+func TestInputInjectionIsAvailable(t *testing.T) {
+	if !hook.Supported {
+		t.Skip("built with ebitenmcp_nohook, which is how you ask for this to be absent")
+	}
+
+	reset(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Verify runs on the first tick, so wait for one before asking.
+	if err := testRT.WaitTicks(ctx, 2); err != nil {
+		t.Fatalf("waiting for the first tick: %v", err)
+	}
+
+	if err := testRT.InputError(); err != nil {
+		t.Fatalf("input injection is not working: %v\n\n"+
+			"hook.Verify could not confirm the mirror of ui.InputState. Nothing will be "+
+			"injected while that is true, and the tests that need input will skip rather "+
+			"than fail — which is why this one exists. Check internal/upstream first: it "+
+			"hashes the declaration this mirrors.", err)
+	}
 }
 
 func TestTicksAdvance(t *testing.T) {

@@ -3,8 +3,8 @@ package upstream
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"go/build"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -33,18 +33,22 @@ func TestGoModPinsSupportedVersion(t *testing.T) {
 }
 
 func TestInputStateLayout(t *testing.T) {
-	path := filepath.Join(
-		build.Default.GOPATH, "pkg", "mod",
-		filepath.FromSlash(Module)+"@"+Version,
-		"internal", "ui", "input.go",
-	)
+	path := filepath.Join(moduleDir(t), "internal", "ui", "input.go")
 
 	src, err := os.ReadFile(path)
 	if err != nil {
-		// The harness container runs binaries without the module cache mounted.
-		// Skipping there is fine: this check is meant for the host and for CI,
-		// where the source is always at hand.
-		t.Skipf("Ebitengine source not available at %s: %v", path, err)
+		// Deliberately not a skip.
+		//
+		// This is the only check that fires before anything is written through
+		// the mirror, and a skip is indistinguishable from a pass in every
+		// report anybody reads. The thing it guards against is writing at the
+		// wrong offsets inside another package's struct, so being quietly absent
+		// is the one behaviour it must not have. If the source is missing, say
+		// so and fail.
+		t.Fatalf("cannot read %s: %v\n\n"+
+			"This check hashes Ebitengine's own declaration, so it needs the source. "+
+			"Run `go mod download %s` and try again. Do not skip it: it is what stands "+
+			"between internal/hook and writing through a stale struct.", path, err, Module)
 	}
 
 	decl := inputStateDecl.Find(src)
@@ -60,6 +64,27 @@ func TestInputStateLayout(t *testing.T) {
 			"update the mirror, then update InputStateSHA256.\n\n%s",
 			Module, Version, got, InputStateSHA256, decl)
 	}
+}
+
+// moduleDir asks the toolchain where the pinned Ebitengine actually is.
+//
+// Guessing at GOPATH/pkg/mod was near enough and not right: it ignores
+// GOMODCACHE, a vendor directory and any replace directive, so on a machine set
+// up in any of those ways the file would be missing and — before this stopped
+// being a skip — the check would have quietly passed.
+func moduleDir(t *testing.T) string {
+	t.Helper()
+
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", Module).Output()
+	if err != nil {
+		t.Fatalf("asking go where %s is: %v", Module, err)
+	}
+
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		t.Fatalf("go could not say where %s is; run `go mod download %s`", Module, Module)
+	}
+	return dir
 }
 
 // moduleRoot walks up from the test's directory to the directory holding go.mod.
