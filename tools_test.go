@@ -1028,6 +1028,88 @@ func TestTypedRunesSurviveALoopThatIsMidFrame(t *testing.T) {
 	}
 }
 
+// TestTouchToolPutsFingersDownAndLiftsThemAgain.
+//
+// Lifting is the half worth testing. Every other input this package injects is
+// either a state that something later sets back — a key released, a cursor
+// moved — or an event that lasts one tick and is gone. A touch is a state with
+// no release of its own: the way you end one is by sending the set of touches
+// that are still down, and the way you end all of them is by sending none. If
+// that does not reach the game, the fingers stay on the screen for the rest of
+// the process and every tool after this one lies about the input.
+func TestTouchToolPutsFingersDownAndLiftsThemAgain(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := testRT.InputError(); err != nil {
+		t.Skipf("input injection is unavailable here: %v", err)
+	}
+
+	// Start from nothing, since a test before this one may have left a finger
+	// down — which is the very thing being checked.
+	testRT.Injector().ReleaseAll()
+
+	_, out, err := s.touch(ctx, nil, touchInput{Touches: []touchPoint{
+		{ID: 1, X: 20, Y: 30},
+		{ID: 2, X: 40, Y: 50},
+	}})
+	if err != nil {
+		t.Fatalf("game_touch: %v", err)
+	}
+	if out.Touches != 2 {
+		t.Errorf("it reports %d touches, want 2", out.Touches)
+	}
+
+	_, state, err := s.inputState(ctx, nil, emptyInput{})
+	if err != nil {
+		t.Fatalf("game_input_state: %v", err)
+	}
+	if len(state.Touches) != 2 {
+		t.Fatalf("the game sees %d fingers down, want 2: %+v", len(state.Touches), state.Touches)
+	}
+
+	// Where they were put, not just how many: a touch whose position never
+	// arrives is a touch at the origin, which a game reads as a real tap
+	// somewhere nobody pressed.
+	where := map[int][2]int{}
+	for _, touch := range state.Touches {
+		where[touch.ID] = [2]int{touch.X, touch.Y}
+	}
+	if got := where[1]; got != [2]int{20, 30} {
+		t.Errorf("finger 1 is at %v, want [20 30]", got)
+	}
+	if got := where[2]; got != [2]int{40, 50} {
+		t.Errorf("finger 2 is at %v, want [40 50]", got)
+	}
+
+	// One left down: the set is what is still touching, so leaving one out is
+	// how a finger is lifted while another stays.
+	if _, _, err = s.touch(ctx, nil, touchInput{Touches: []touchPoint{{ID: 2, X: 40, Y: 50}}}); err != nil {
+		t.Fatalf("game_touch: %v", err)
+	}
+	if _, state, err = s.inputState(ctx, nil, emptyInput{}); err != nil {
+		t.Fatalf("game_input_state: %v", err)
+	}
+	if len(state.Touches) != 1 || state.Touches[0].ID != 2 {
+		t.Errorf("after lifting one finger the game sees %+v, want only finger 2", state.Touches)
+	}
+
+	// And an empty list lifts them all, which is what the tool's own schema
+	// promises.
+	if _, _, err = s.touch(ctx, nil, touchInput{Touches: []touchPoint{}}); err != nil {
+		t.Fatalf("game_touch: %v", err)
+	}
+	if _, state, err = s.inputState(ctx, nil, emptyInput{}); err != nil {
+		t.Fatalf("game_input_state: %v", err)
+	}
+	if len(state.Touches) != 0 {
+		t.Errorf("after lifting every finger the game still sees %+v", state.Touches)
+	}
+}
+
 // TestInputStateSeesWhatWasInjected is the tool's whole job, and it did not do
 // it: an agent asking what the game thinks is pressed got "nothing" whenever
 // the answer was due to injection, which in this library is always.
