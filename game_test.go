@@ -212,6 +212,33 @@ func reset(t *testing.T) *probeGame {
 	return game
 }
 
+// settle waits for the loop to come to rest after a pause.
+//
+// Pause takes effect at a tick boundary, not at the instant it is called: the
+// loop may already be past shouldUpdate and on its way to advance, so exactly
+// one more tick can land afterwards. A test that took its baseline before that
+// tick saw the counter move and called it a bug — once in every few runs, which
+// is the worst rate there is.
+func settle(t *testing.T) int64 {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	last := testRT.Tick()
+
+	for time.Now().Before(deadline) {
+		time.Sleep(30 * time.Millisecond)
+
+		now := testRT.Tick()
+		if now == last {
+			return now
+		}
+		last = now
+	}
+
+	t.Fatalf("the loop never came to rest after being paused; it is at tick %d", last)
+	return 0
+}
+
 func TestTicksAdvance(t *testing.T) {
 	reset(t)
 
@@ -235,7 +262,8 @@ func TestPauseHoldsTheGame(t *testing.T) {
 	game := reset(t)
 
 	testRT.Pause()
-	tick, updates := testRT.Tick(), game.count()
+	tick := settle(t)
+	updates := game.count()
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -251,7 +279,7 @@ func TestStepRunsExactlyN(t *testing.T) {
 	game := reset(t)
 
 	testRT.Pause()
-	time.Sleep(50 * time.Millisecond)
+	settle(t)
 	start := game.count()
 
 	testRT.Step(3)
