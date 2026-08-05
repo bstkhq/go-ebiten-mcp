@@ -45,8 +45,8 @@ type media struct {
 	baseURL string
 }
 
-func newMedia(baseURL string) (*media, error) {
-	dir, err := filepath.Abs(MediaDir)
+func newMedia(dir, baseURL string) (*media, error) {
+	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}

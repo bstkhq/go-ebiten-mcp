@@ -39,22 +39,13 @@ func Serve(rt *Runtime, opts *Options) (*Server, error) {
 	}
 
 	addr := ln.Addr().String()
-	baseURL := "http://" + addr
 
-	m, err := newMedia(baseURL)
+	s, err := newServer(rt, opts, MediaDir, "http://"+addr)
 	if err != nil {
 		ln.Close()
 		return nil, err
 	}
-
-	s := &Server{
-		rt:     rt,
-		opts:   opts,
-		media:  m,
-		traces: newTraceRing(),
-		addr:   addr,
-		ln:     ln,
-	}
+	s.addr, s.ln = addr, ln
 
 	// Capturing the process's own output starts here rather than at
 	// construction: a game with no server has no reason to have its
@@ -66,6 +57,20 @@ func Serve(rt *Runtime, opts *Options) (*Server, error) {
 
 	s.announce()
 	return s, nil
+}
+
+// newServer assembles everything a tool needs, and nothing a socket does.
+//
+// Splitting it out is what makes the tools testable at all: a handler is the
+// interesting part of a tool and not one of them needs a listener, an HTTP
+// server or the process's descriptors rewired. Serve adds those on top.
+func newServer(rt *Runtime, opts *Options, mediaDir, baseURL string) (*Server, error) {
+	m, err := newMedia(mediaDir, baseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Server{rt: rt, opts: opts, media: m, traces: newTraceRing()}, nil
 }
 
 // listen binds the requested address, falling back to a free port on the same
@@ -150,8 +155,16 @@ func (s *Server) Addr() string { return s.addr }
 func (s *Server) URL() string { return "http://" + s.addr + Path }
 
 // Close stops serving. The game keeps running.
+//
+// Nil-safe on the HTTP server because newServer builds one without a listener —
+// that is the whole point of it — and closing such a server has to be a no-op
+// rather than the one thing in this package that panics on tidying up.
 func (s *Server) Close() error {
 	s.discoveryFile(true)
+
+	if s.http == nil {
+		return nil
+	}
 	return s.http.Close()
 }
 
