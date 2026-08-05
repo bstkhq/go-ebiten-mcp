@@ -446,7 +446,7 @@ func wrap(rt *Runtime) ebiten.Game {
 	base.hasFinal = finalScreen
 
 	rt.mu.Lock()
-	rt.hasFinal = finalScreen
+	rt.hasFinal, rt.hasLayoutF = finalScreen, layoutF
 	rt.mu.Unlock()
 
 	switch {

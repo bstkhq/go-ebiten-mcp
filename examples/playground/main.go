@@ -38,28 +38,33 @@ func main() {
 
 	game := NewGame()
 
+	// The one line. Without EBITEN_MCP_ADDR this is ebiten.RunGame and nothing
+	// else: no socket, no goroutines.
 	// A named view of the game, published for game_inspect to fetch as
 	// "@summary". Walking the tree by path answers "what is this field"; this
 	// answers "what is going on", which is a different question and one only the
-	// game can answer — the screen's name, and where the player is, are computed
+	// game can answer — the screen's name and where the player is are computed
 	// here and stored nowhere.
-	ebitenmcp.RegisterState("summary", func() any {
+	//
+	// It is handed the game that is running rather than closing over this one,
+	// so it keeps telling the truth after game_reset builds a new one.
+	summary := ebitenmcp.WithState("summary", func(current ebiten.Game) any {
+		g, ok := current.(*Game)
+		if !ok {
+			return nil
+		}
 		return map[string]any{
-			"screen": screenNames[game.current],
-			"tick":   game.ticks,
-			"crt":    game.crt,
-			"player": map[string]float64{
-				"x": game.screens.player.pos.x,
-				"y": game.screens.player.pos.y,
-			},
+			"screen": screenNames[g.current],
+			"tick":   g.ticks,
+			"crt":    g.crt,
+			"player": map[string]float64{"x": g.screens.player.pos.x, "y": g.screens.player.pos.y},
 		}
 	})
 
-	// The one line. Without EBITEN_MCP_ADDR this is ebiten.RunGame and nothing
-	// else: no socket, no goroutines.
 	if err := ebitenmcp.RunGame(game,
 		ebitenmcp.WithName("playground"),
 		ebitenmcp.WithFactory(func() ebiten.Game { return NewGame() }),
+		summary,
 	); err != nil {
 		log.Fatal(err)
 	}

@@ -25,6 +25,10 @@ import (
 type Gamepads struct {
 	rt *Runtime
 
+	// connecting serialises Connect end to end; mu guards devices and is held
+	// for the whole of any operation on one.
+	connecting sync.Mutex
+
 	mu      sync.Mutex
 	devices map[ebiten.GamepadID]*uinput.Device
 }
@@ -58,6 +62,14 @@ func GamepadsAvailable() error { return uinput.Available() }
 // any earlier would hand back an id for a controller nothing can see yet — and
 // the first button press would land nowhere with no error to explain it.
 func (g *Gamepads) Connect(ctx context.Context, profile GamepadProfile) (ebiten.GamepadID, error) {
+	// One at a time, end to end. Connect works out which id is new by comparing
+	// the list before with the list after, so two of them running together both
+	// see the same gap, both claim the same id, and the second overwrites the
+	// first — leaving a uinput device with no handle, which nothing can
+	// disconnect and which outlives the process.
+	g.connecting.Lock()
+	defer g.connecting.Unlock()
+
 	before, err := g.visible(ctx)
 	if err != nil {
 		return 0, err
@@ -143,28 +155,22 @@ func (g *Gamepads) Disconnect(id ebiten.GamepadID) error {
 
 // Button presses or releases one, by evdev code.
 func (g *Gamepads) Button(id ebiten.GamepadID, code uint16, pressed bool) error {
-	device, err := g.device(id)
-	if err != nil {
-		return err
-	}
-
-	if err := device.Button(code, pressed); err != nil {
-		return err
-	}
-	return device.Sync()
+	return g.withDevice(id, func(device *uinput.Device) error {
+		if err := device.Button(code, pressed); err != nil {
+			return err
+		}
+		return device.Sync()
+	})
 }
 
 // Axis moves one, in the range its profile declared.
 func (g *Gamepads) Axis(id ebiten.GamepadID, code uint16, value int32) error {
-	device, err := g.device(id)
-	if err != nil {
-		return err
-	}
-
-	if err := device.Axis(code, value); err != nil {
-		return err
-	}
-	return device.Sync()
+	return g.withDevice(id, func(device *uinput.Device) error {
+		if err := device.Axis(code, value); err != nil {
+			return err
+		}
+		return device.Sync()
+	})
 }
 
 // Apply sends several changes as one movement.
@@ -173,31 +179,34 @@ func (g *Gamepads) Axis(id ebiten.GamepadID, code uint16, value int32) error {
 // diagonally is two axis events and one sync. Sending them separately would
 // show up as two straight movements, which is not what the player did.
 func (g *Gamepads) Apply(id ebiten.GamepadID, buttons map[uint16]bool, axes map[uint16]int32) error {
-	device, err := g.device(id)
-	if err != nil {
-		return err
-	}
+	return g.withDevice(id, func(device *uinput.Device) error {
+		for code, pressed := range buttons {
+			if err := device.Button(code, pressed); err != nil {
+				return err
+			}
+		}
+		for code, value := range axes {
+			if err := device.Axis(code, value); err != nil {
+				return err
+			}
+		}
 
-	for code, pressed := range buttons {
-		if err := device.Button(code, pressed); err != nil {
-			return err
-		}
-	}
-	for code, value := range axes {
-		if err := device.Axis(code, value); err != nil {
-			return err
-		}
-	}
-	return device.Sync()
+		// One Sync for the whole batch: the kernel treats everything between two
+		// of them as a single report, which is how a stick and a button pressed
+		// together arrive in the same tick rather than in two.
+		return device.Sync()
+	})
 }
 
 // Profile returns what a connected controller claims to be.
 func (g *Gamepads) Profile(id ebiten.GamepadID) (GamepadProfile, error) {
-	device, err := g.device(id)
-	if err != nil {
-		return GamepadProfile{}, err
-	}
-	return device.Profile(), nil
+	var profile GamepadProfile
+
+	err := g.withDevice(id, func(device *uinput.Device) error {
+		profile = device.Profile()
+		return nil
+	})
+	return profile, err
 }
 
 // Connected lists the controllers created here.
@@ -212,16 +221,24 @@ func (g *Gamepads) Connected() []ebiten.GamepadID {
 	return ids
 }
 
-func (g *Gamepads) device(id ebiten.GamepadID) (*uinput.Device, error) {
+// withDevice runs fn against a controller this package created, holding the lock
+// for the whole operation.
+//
+// Looking the device up and then using it after the lock is dropped — which is
+// what this used to do — races with Disconnect: the device can be closed and its
+// file set to nil in between. Holding it also stops two callers interleaving
+// their events before a Sync, which the kernel would deliver as one incoherent
+// report.
+func (g *Gamepads) withDevice(id ebiten.GamepadID, fn func(*uinput.Device) error) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	device := g.devices[id]
 	if device == nil {
-		return nil, fmt.Errorf("gamepad %d was not created here; only virtual controllers "+
+		return fmt.Errorf("gamepad %d was not created here; only virtual controllers "+
 			"can be driven, and a real one is driven by whoever is holding it", id)
 	}
-	return device, nil
+	return fn(device)
 }
 
 // Close unplugs everything created here.

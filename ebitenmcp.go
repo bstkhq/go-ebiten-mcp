@@ -36,6 +36,10 @@ type Options struct {
 	// one. Defaults to StageFinal, and only means anything for a game that draws
 	// its own final screen.
 	CaptureStage Stage
+
+	// States are named snapshots the game publishes, reachable as @name from
+	// game_inspect. See WithState.
+	States map[string]StateProvider
 }
 
 // Option customises Options.
@@ -64,6 +68,18 @@ func WithFactory(factory func() ebiten.Game) Option {
 // pass — without saying so — is returning something the player never saw.
 func WithCaptureStage(stage Stage) Option {
 	return func(o *Options) { o.CaptureStage = stage }
+}
+
+// WithState publishes a named snapshot of the game, reachable as @name from
+// game_inspect. The provider is handed whatever game is running when it is
+// called, so it keeps working across game_reset.
+func WithState(name string, fn StateProvider) Option {
+	return func(o *Options) {
+		if o.States == nil {
+			o.States = map[string]StateProvider{}
+		}
+		o.States[name] = fn
+	}
 }
 
 func newOptions(opts []Option) *Options {
@@ -114,6 +130,9 @@ func Wrap(game ebiten.Game, opts ...Option) (ebiten.Game, *Runtime) {
 
 	rt := newRuntime(game)
 	rt.factory = o.Factory
+	for name, fn := range o.States {
+		rt.RegisterState(name, fn)
+	}
 	if o.CaptureStage != "" {
 		rt.defaultStage = o.CaptureStage
 	}

@@ -89,7 +89,7 @@ func (s *Server) state(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*m
 
 		"go": goStats(),
 
-		"state_providers": stateProviderNames(),
+		"state_providers": s.rt.stateProviderNames(),
 		"media_dir":       s.media.dir,
 		"frame_ring":      s.rt.Ring().Status(),
 	}
@@ -197,10 +197,10 @@ func (s *Server) inspect(ctx context.Context, _ *mcpsdk.CallToolRequest, in insp
 		if name, ok := strings.CutPrefix(in.Path, "@"); ok {
 			name, rest, _ := strings.Cut(name, ".")
 
-			snapshot, found := callStateProvider(name)
+			snapshot, found := s.rt.callStateProvider(name)
 			if !found {
 				err = fmt.Errorf("no registered snapshot %q; there is %s",
-					name, strings.Join(stateProviderNames(), ", "))
+					name, strings.Join(s.rt.stateProviderNames(), ", "))
 				return
 			}
 			if rest == "" {

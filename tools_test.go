@@ -257,10 +257,10 @@ func TestInspectToolReturnsARegisteredSnapshot(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	RegisterState("probe", func() any {
+	testRT.RegisterState("probe", func(ebiten.Game) any {
 		return map[string]any{"answer": 42}
 	})
-	defer UnregisterState("probe")
+	defer testRT.UnregisterState("probe")
 
 	_, out, err := s.inspect(ctx, nil, inspectInput{Path: "@probe"})
 	if err != nil {

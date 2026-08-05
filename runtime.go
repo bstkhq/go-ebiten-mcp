@@ -83,10 +83,12 @@ type Runtime struct {
 	lastFrame    *Frame
 	defaultStage Stage
 	hasFinal     bool
+	hasLayoutF   bool
 
 	server   *Server
 	gamepads *Gamepads
 	ring     *frameRing
+	states   map[string]StateProvider
 }
 
 // Server returns the MCP server serving this game, or nil when none was
@@ -160,6 +162,18 @@ func (r *Runtime) Do(ctx context.Context, fn func()) error {
 	// is written before done is closed, and the channel carries it across.
 	command := func() {
 		defer close(done)
+
+		// Checked here, at the last moment before running.
+		//
+		// A command that timed out is still sitting in the queue: the caller has
+		// already been told the loop was stalled and has gone, and if the loop
+		// then recovers, the mutation lands anyway. A game_reset or a game_step
+		// arriving that way is a change nobody is expecting and nothing explains
+		// — which is worse than the failure the caller was already told about.
+		if ctx.Err() != nil {
+			return
+		}
+
 		defer func() {
 			if v := recover(); v != nil {
 				raised = &CommandPanic{Value: fmt.Sprint(v), Stack: string(debug.Stack())}
@@ -358,6 +372,10 @@ func (r *Runtime) Timings() []FrameTiming {
 // holds is the only way to get a fresh one, and it is what makes independent
 // tests possible inside a single test binary.
 func (r *Runtime) SetGame(ctx context.Context, game ebiten.Game) error {
+	if err := r.canReplace(game); err != nil {
+		return err
+	}
+
 	return r.Do(ctx, func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -365,6 +383,37 @@ func (r *Runtime) SetGame(ctx context.Context, game ebiten.Game) error {
 		r.game = game
 		r.crash = nil
 	})
+}
+
+// canReplace refuses a game Ebitengine could not see properly.
+//
+// Go cannot implement an interface conditionally, so the wrapper's concrete type
+// is chosen once, from the first game, and Ebitengine decides what to call by
+// asserting on that type. A replacement that implements FinalScreenDrawer where
+// the first did not would simply never have it called — its final pass would not
+// run, and every capture would quietly be of something the player never sees.
+// The other direction leaves the wrapper calling into an interface that is no
+// longer there.
+//
+// Saying so is the only honest option: nothing here can change the type of an
+// object Ebitengine is already holding.
+func (r *Runtime) canReplace(game ebiten.Game) error {
+	_, layoutF := game.(ebiten.LayoutFer)
+	_, finalScreen := game.(ebiten.FinalScreenDrawer)
+
+	r.mu.Lock()
+	wantLayoutF, wantFinal := r.hasLayoutF, r.hasFinal
+	r.mu.Unlock()
+
+	if layoutF == wantLayoutF && finalScreen == wantFinal {
+		return nil
+	}
+
+	return fmt.Errorf("this game implements LayoutFer=%v FinalScreenDrawer=%v and the one it would "+
+		"replace implements %v and %v; Ebitengine picked what to call from the first game and "+
+		"cannot be told otherwise, so the mismatched half would silently never run. Make every "+
+		"game the factory builds implement the same set",
+		layoutF, finalScreen, wantLayoutF, wantFinal)
 }
 
 // Reset replaces the running game with a new one from the factory given at

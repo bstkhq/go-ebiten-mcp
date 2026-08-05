@@ -6,9 +6,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 // Inspect turns a live value into plain JSON-able data.
@@ -356,38 +357,63 @@ func fieldNames(t reflect.Type) []string {
 	return names
 }
 
-// stateProviders lets a game publish named views of itself, so an inspection
-// can return "the podium, as the game understands it" rather than a struct dump
-// the caller has to interpret.
-var stateProviders sync.Map
-
-// RegisterState publishes a named snapshot of some part of the game.
+// StateProvider is a named view a game publishes of itself, so an inspection can
+// return "the podium, as the game understands it" rather than a struct dump the
+// caller has to interpret.
 //
-// The function is called inside the game loop, so it can read game state
-// without locking, and it must not block.
-func RegisterState(name string, fn func() any) {
-	stateProviders.Store(name, fn)
+// It is handed the game that is running now. That is the whole reason this is
+// not a plain func() any: the registry used to be global and the function
+// captured whatever game existed when it was written, so after a game_reset
+// built a fresh one, @summary went on describing the object nobody was playing
+// any more — and looked entirely plausible doing it.
+//
+// It runs inside the game loop, so it can read state without locking, and it
+// must not block.
+type StateProvider func(game ebiten.Game) any
+
+// RegisterState publishes a named snapshot. Registering the same name twice
+// replaces it.
+func (r *Runtime) RegisterState(name string, fn StateProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.states == nil {
+		r.states = map[string]StateProvider{}
+	}
+	r.states[name] = fn
 }
 
-// UnregisterState removes a provider.
-func UnregisterState(name string) {
-	stateProviders.Delete(name)
+// UnregisterState removes one.
+func (r *Runtime) UnregisterState(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.states, name)
 }
 
-func stateProviderNames() []string {
-	var names []string
-	stateProviders.Range(func(k, _ any) bool {
-		names = append(names, k.(string))
-		return true
-	})
+func (r *Runtime) stateProviderNames() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	names := make([]string, 0, len(r.states))
+	for name := range r.states {
+		names = append(names, name)
+	}
 	sort.Strings(names)
+
 	return names
 }
 
-func callStateProvider(name string) (any, bool) {
-	fn, ok := stateProviders.Load(name)
+// callStateProvider runs one against the game that is running now. Must be
+// called from inside the loop.
+func (r *Runtime) callStateProvider(name string) (any, bool) {
+	r.mu.Lock()
+	fn, ok := r.states[name]
+	game := r.game
+	r.mu.Unlock()
+
 	if !ok {
 		return nil, false
 	}
-	return fn.(func() any)(), true
+	return fn(game), true
 }
