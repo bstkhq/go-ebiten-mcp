@@ -71,52 +71,52 @@ var (
 	}
 )
 
-func (s *Server) gamepad(ctx context.Context, _ *mcpsdk.CallToolRequest, in gamepadInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) gamepad(ctx context.Context, _ *mcpsdk.CallToolRequest, in gamepadInput) (*mcpsdk.CallToolResult, InputOutput, error) {
 	if err := uinput.Available(); err != nil {
-		return nil, nil, fmt.Errorf("no virtual controller here: %w", err)
+		return nil, InputOutput{}, fmt.Errorf("no virtual controller here: %w", err)
 	}
 
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
 	pads := s.rt.Gamepads()
-	out := map[string]any{}
+	var out InputOutput
 
 	if in.Connect != nil {
 		profile, err := in.Connect.profile()
 		if err != nil {
-			return nil, nil, err
+			return nil, InputOutput{}, err
 		}
 
 		id, err := pads.Connect(ctx, profile)
 		if err != nil {
-			return nil, nil, err
+			return nil, InputOutput{}, err
 		}
 
-		out["connected"] = id
-		out["sdl_id"] = profile.SDLID()
+		out.Connected = intPtr(int(id))
+		out.SDLID = profile.SDLID()
 		in.ID = intPtr(int(id))
 	}
 
 	id, err := s.gamepadID(pads, in.ID)
 	if err != nil && (len(in.Buttons) > 0 || len(in.Axes) > 0 || in.Dpad != "" ||
 		len(in.RawButtons) > 0 || len(in.RawAxes) > 0 || in.Disconnect) {
-		return nil, nil, err
+		return nil, InputOutput{}, err
 	}
 
 	if err == nil {
 		if err := s.applyGamepad(pads, id, in); err != nil {
-			return nil, nil, err
+			return nil, InputOutput{}, err
 		}
-		out["id"] = id
+		out.GamepadID = intPtr(int(id))
 	}
 
 	if in.Disconnect {
 		if err := pads.Disconnect(id); err != nil {
-			return nil, nil, err
+			return nil, InputOutput{}, err
 		}
-		out["disconnected"] = id
-		delete(out, "id")
+		out.Disconnected = intPtr(int(id))
+		out.GamepadID = nil
 	}
 
 	return s.finish(ctx, in.afterInput, out)

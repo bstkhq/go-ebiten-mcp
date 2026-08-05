@@ -26,23 +26,17 @@ import (
 
 // untypedOutput are the tools whose answers are still maps.
 //
-// Not an oversight in the same way as the others: each of these returns
-// something genuinely shaped by what it found — the whole process for
-// game_state, whatever gamepads exist for game_input_state — and typing them is
-// a design question about what the contract should be rather than a
+// Four left, and not an oversight: each returns something shaped by what it
+// found rather than by what it was asked. game_state describes a whole process
+// — window, renderer, memory, the buffer, a crash if there is one; game_state
+// and game_input_state both grow a field whenever Ebitengine does. Typing them
+// means deciding what the contract is, which is a design question and not a
 // transcription. Kept as a list so the number is visible and can only go down.
 var untypedOutput = map[string]bool{
 	"game_state":       true,
 	"game_frametimes":  true,
 	"game_goroutines":  true,
 	"game_input_state": true,
-	"game_gamepad":     true,
-	"game_key":         true,
-	"game_type":        true,
-	"game_mouse":       true,
-	"game_touch":       true,
-	"game_set_tps":     true,
-	"game_reset":       true,
 }
 
 func newTestServer(t *testing.T) *Server {
@@ -412,8 +406,11 @@ func TestKeyToolIsSeenByTheGame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("game_key: %v", err)
 	}
-	if out == nil {
-		t.Error("game_key answered with nothing")
+	if len(out.Keys) != 1 || out.Keys[0] != "arrowdown" {
+		t.Errorf("game_key answered with keys=%v, want the one it was given", out.Keys)
+	}
+	if out.Tick == 0 {
+		t.Error("game_key answered without saying which tick the press landed in")
 	}
 
 	if _, _, err := s.key(ctx, nil, keyInput{Keys: []string{"nonsense"}}); err == nil {

@@ -2,6 +2,7 @@ package ebitenmcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -72,17 +73,17 @@ func (s *Server) requireInput() error {
 }
 
 // finish applies the shared "and then" behaviour.
-func (s *Server) finish(ctx context.Context, after afterInput, out map[string]any) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) finish(ctx context.Context, after afterInput, out InputOutput) (*mcpsdk.CallToolResult, InputOutput, error) {
 	if after.ThenWaitTicks > 0 {
 		waitCtx, cancel := tickBudget(ctx, after.ThenWaitTicks)
 		defer cancel()
 
 		if err := s.rt.WaitTicks(waitCtx, after.ThenWaitTicks); err != nil {
-			return nil, nil, s.stalled(err)
+			return nil, InputOutput{}, s.stalled(err)
 		}
 	}
 
-	out["tick"] = s.rt.Tick()
+	out.Tick = s.rt.Tick()
 
 	if !after.ThenScreenshot {
 		return nil, out, nil
@@ -93,19 +94,21 @@ func (s *Server) finish(ctx context.Context, after afterInput, out map[string]an
 
 	frame, err := s.rt.Capture(shotCtx)
 	if err != nil {
-		return nil, nil, s.stalled(err)
+		return nil, InputOutput{}, s.stalled(err)
 	}
 
 	result, _, err := s.frameResult("shot", frame, 0, false, describe(out))
 	return result, out, err
 }
 
-func describe(out map[string]any) string {
-	parts := make([]string, 0, len(out))
-	for k, v := range out {
-		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+// describe puts what the call did on the picture it returns, so a contact sheet
+// or a chat log says what was pressed rather than only showing the aftermath.
+func describe(out InputOutput) string {
+	data, err := json.Marshal(out)
+	if err != nil {
+		return ""
 	}
-	return strings.Join(parts, " ")
+	return string(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -121,14 +124,14 @@ type keyInput struct {
 	Release bool     `json:"release,omitempty" jsonschema:"release keys held by an earlier call"`
 }
 
-func (s *Server) key(ctx context.Context, _ *mcpsdk.CallToolRequest, in keyInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) key(ctx context.Context, _ *mcpsdk.CallToolRequest, in keyInput) (*mcpsdk.CallToolResult, InputOutput, error) {
 	if err := s.requireInput(); err != nil {
-		return nil, nil, err
+		return nil, InputOutput{}, err
 	}
 
 	keys, err := parseKeys(in.Keys)
 	if err != nil {
-		return nil, nil, err
+		return nil, InputOutput{}, err
 	}
 
 	inj := s.rt.Injector()
@@ -158,7 +161,7 @@ func (s *Server) key(ctx context.Context, _ *mcpsdk.CallToolRequest, in keyInput
 
 		if err := s.rt.WaitTicks(holdCtx, in.Ticks); err != nil {
 			inj.ReleaseAll()
-			return nil, nil, s.stalled(err)
+			return nil, InputOutput{}, s.stalled(err)
 		}
 
 		for _, k := range keys {
@@ -166,11 +169,15 @@ func (s *Server) key(ctx context.Context, _ *mcpsdk.CallToolRequest, in keyInput
 		}
 	}
 
-	return s.finish(ctx, in.afterInput, map[string]any{
-		"keys":  in.Keys,
-		"held":  in.Hold,
-		"ticks": in.Ticks,
-	})
+	out := InputOutput{Keys: in.Keys}
+	if in.Hold {
+		out.Held = in.Keys
+	}
+	if in.Release {
+		out.Released = in.Keys
+	}
+
+	return s.finish(ctx, in.afterInput, out)
 }
 
 // parseKeys uses Ebitengine's own key table, so the names a caller can use are
@@ -202,12 +209,12 @@ type typeInput struct {
 	Text string `json:"text" jsonschema:"the text to type"`
 }
 
-func (s *Server) typeText(ctx context.Context, _ *mcpsdk.CallToolRequest, in typeInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) typeText(ctx context.Context, _ *mcpsdk.CallToolRequest, in typeInput) (*mcpsdk.CallToolResult, InputOutput, error) {
 	if err := s.requireInput(); err != nil {
-		return nil, nil, err
+		return nil, InputOutput{}, err
 	}
 	if in.Text == "" {
-		return nil, nil, fmt.Errorf("no text given")
+		return nil, InputOutput{}, fmt.Errorf("no text given")
 	}
 
 	s.rt.Injector().Type([]rune(in.Text))
@@ -218,7 +225,7 @@ func (s *Server) typeText(ctx context.Context, _ *mcpsdk.CallToolRequest, in typ
 		in.ThenWaitTicks = 1
 	}
 
-	return s.finish(ctx, in.afterInput, map[string]any{"typed": in.Text})
+	return s.finish(ctx, in.afterInput, InputOutput{Text: in.Text})
 }
 
 // ---------------------------------------------------------------------------
@@ -242,57 +249,57 @@ type mouseInput struct {
 	Release bool     `json:"release_cursor,omitempty" jsonschema:"stop pinning the cursor and hand it back to the real pointer"`
 }
 
-func (s *Server) mouse(ctx context.Context, _ *mcpsdk.CallToolRequest, in mouseInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) mouse(ctx context.Context, _ *mcpsdk.CallToolRequest, in mouseInput) (*mcpsdk.CallToolResult, InputOutput, error) {
 	if err := s.requireInput(); err != nil {
-		return nil, nil, err
+		return nil, InputOutput{}, err
 	}
 
 	button, err := parseButton(in.Button)
 	if err != nil {
-		return nil, nil, err
+		return nil, InputOutput{}, err
 	}
 
 	inj := s.rt.Injector()
-	out := map[string]any{}
+	var out InputOutput
 
 	if in.Release {
 		inj.ReleaseCursor()
-		out["cursor"] = "released"
+		out.Cursor = "released"
 	}
 
 	if in.X != nil && in.Y != nil {
 		inj.MoveCursor(*in.X, *in.Y)
-		out["moved_to"] = []float64{*in.X, *in.Y}
+		out.MovedTo = []float64{*in.X, *in.Y}
 	}
 
 	if in.ScrollX != 0 || in.ScrollY != 0 {
 		inj.Scroll(in.ScrollX, in.ScrollY)
-		out["scrolled"] = []float64{in.ScrollX, in.ScrollY}
+		out.Scrolled = []float64{in.ScrollX, in.ScrollY}
 	}
 
 	switch {
 	case in.ToX != nil && in.ToY != nil:
 		if in.X == nil || in.Y == nil {
-			return nil, nil, fmt.Errorf("a drag needs a starting x and y as well as to_x and to_y")
+			return nil, InputOutput{}, fmt.Errorf("a drag needs a starting x and y as well as to_x and to_y")
 		}
 		if err := s.drag(ctx, *in.X, *in.Y, *in.ToX, *in.ToY, button, in.Steps); err != nil {
-			return nil, nil, err
+			return nil, InputOutput{}, err
 		}
-		out["dragged_to"] = []float64{*in.ToX, *in.ToY}
+		out.DraggedTo = []float64{*in.ToX, *in.ToY}
 
 	case in.Click:
 		if err := s.click(ctx, button); err != nil {
-			return nil, nil, err
+			return nil, InputOutput{}, err
 		}
-		out["clicked"] = in.Button
+		out.Clicked = in.Button
 
 	case in.Down:
 		inj.MouseDown(button)
-		out["holding"] = in.Button
+		out.Holding = in.Button
 
 	case in.Up:
 		inj.MouseUp(button)
-		out["released"] = in.Button
+		out.Button = in.Button
 	}
 
 	return s.finish(ctx, in.afterInput, out)
@@ -405,9 +412,9 @@ type touchInput struct {
 	Touches []touchPoint `json:"touches" jsonschema:"the touches that are currently down; an empty list lifts them all"`
 }
 
-func (s *Server) touch(ctx context.Context, _ *mcpsdk.CallToolRequest, in touchInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) touch(ctx context.Context, _ *mcpsdk.CallToolRequest, in touchInput) (*mcpsdk.CallToolResult, InputOutput, error) {
 	if err := s.requireInput(); err != nil {
-		return nil, nil, err
+		return nil, InputOutput{}, err
 	}
 
 	s.applyTouches(in.Touches)
@@ -416,7 +423,7 @@ func (s *Server) touch(ctx context.Context, _ *mcpsdk.CallToolRequest, in touchI
 		in.ThenWaitTicks = 1
 	}
 
-	return s.finish(ctx, in.afterInput, map[string]any{"touches": len(in.Touches)})
+	return s.finish(ctx, in.afterInput, InputOutput{Touches: len(in.Touches)})
 }
 
 // applyTouches replaces the set of active touches, shared with game_script so

@@ -106,6 +106,47 @@ type WaitOutput struct {
 	Waited  string `json:"waited,omitempty"`
 }
 
+// InputOutput is what the tools that drive the game answer with: the tick the
+// input landed in, and a description of what was done.
+//
+// One type for all of them rather than one each, because every field here is
+// "what did this call do" and a client that wants to know reads the same place
+// whichever tool it called. The empty ones are left out.
+type InputOutput struct {
+	Tick int64 `json:"tick"`
+
+	Keys      []string  `json:"keys,omitempty"`
+	Held      []string  `json:"held,omitempty"`
+	Released  []string  `json:"released,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	Touches   int       `json:"touches,omitempty"`
+	MovedTo   []float64 `json:"moved_to,omitempty"`
+	DraggedTo []float64 `json:"dragged_to,omitempty"`
+	Scrolled  []float64 `json:"scrolled,omitempty"`
+	Clicked   string    `json:"clicked,omitempty"`
+	Holding   string    `json:"holding,omitempty"`
+	Button    string    `json:"released_button,omitempty"`
+	Cursor    string    `json:"cursor,omitempty"`
+
+	// A gamepad call goes through the same finish, so its answers live here too
+	// rather than in a type that would be this one with four fields added.
+	Connected    *int   `json:"connected,omitempty"`
+	SDLID        string `json:"sdl_id,omitempty"`
+	GamepadID    *int   `json:"gamepad_id,omitempty"`
+	Disconnected *int   `json:"disconnected,omitempty"`
+}
+
+// TPSOutput is game_set_tps' answer.
+type TPSOutput struct {
+	TPS int `json:"tps"`
+}
+
+// ResetOutput is game_reset's answer.
+type ResetOutput struct {
+	Tick  int64 `json:"tick"`
+	Reset bool  `json:"reset"`
+}
+
 // InspectOutput is game_inspect's answer.
 type InspectOutput struct {
 	Tick  int64  `json:"tick"`

@@ -95,14 +95,14 @@ type setTPSInput struct {
 	TPS int `json:"tps" jsonschema:"ticks per second; 0 means run as fast as the machine allows"`
 }
 
-func (s *Server) setTPS(_ context.Context, _ *mcpsdk.CallToolRequest, in setTPSInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) setTPS(_ context.Context, _ *mcpsdk.CallToolRequest, in setTPSInput) (*mcpsdk.CallToolResult, TPSOutput, error) {
 	tps := in.TPS
 	if tps <= 0 {
 		tps = ebiten.SyncWithFPS
 	}
 	ebiten.SetTPS(tps)
 
-	return nil, map[string]any{"tps": ebiten.TPS()}, nil
+	return nil, TPSOutput{TPS: ebiten.TPS()}, nil
 }
 
 type waitInput struct {
@@ -204,12 +204,12 @@ func (s *Server) pathValue(ctx context.Context, path string) (any, error) {
 	return value, err
 }
 
-func (s *Server) reset(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) reset(ctx context.Context, _ *mcpsdk.CallToolRequest, _ emptyInput) (*mcpsdk.CallToolResult, ResetOutput, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
 	if err := s.rt.Reset(ctx); err != nil {
-		return nil, nil, err
+		return nil, ResetOutput{}, err
 	}
-	return nil, map[string]any{"tick": s.rt.Tick(), "reset": true}, nil
+	return nil, ResetOutput{Tick: s.rt.Tick(), Reset: true}, nil
 }
