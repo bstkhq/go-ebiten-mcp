@@ -175,7 +175,14 @@ func (g *probeGame) block(d time.Duration) {
 }
 
 func TestMain(m *testing.M) {
-	wrapped, rt := Wrap(newProbeGame(color.RGBA{R: 0x20, G: 0x40, B: 0x80, A: 0xff}))
+	// With a factory, so game_reset has something to reset to. Without one it
+	// can only answer that it was not configured, which is a third of what the
+	// tool does and the least interesting third. Nothing else notices: reset
+	// below swaps the game with SetGame and never asks for the factory.
+	fill := color.RGBA{R: 0x20, G: 0x40, B: 0x80, A: 0xff}
+	factory := func() ebiten.Game { return newProbeGame(fill) }
+
+	wrapped, rt := Wrap(factory(), WithFactory(factory))
 	testRT = rt
 
 	// The live wrapper, for the one test that has to look at what it is holding.

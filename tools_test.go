@@ -881,9 +881,13 @@ func splitContent(t *testing.T, result *mcpsdk.CallToolResult) (*mcpsdk.ImageCon
 	return image, text.String()
 }
 
-// listTools registers every tool the way a client sees them: over a real MCP
-// session, so the schemas are the ones that would reach one.
-func listTools(t *testing.T, ctx context.Context, s *Server) map[string]*mcpsdk.Tool {
+// newTestSession is a client and a server joined by a pipe, which is as close
+// to a real one as this gets without a socket.
+//
+// Worth having its own session rather than one per call: s.mcp() builds a fresh
+// server and registers all twenty-three tools every time it is called, so a
+// test that walks the whole set would otherwise pay for that walk twice over.
+func newTestSession(t *testing.T, ctx context.Context, s *Server) *mcpsdk.ClientSession {
 	t.Helper()
 
 	client, server := mcpsdk.NewInMemoryTransports()
@@ -901,7 +905,15 @@ func listTools(t *testing.T, ctx context.Context, s *Server) map[string]*mcpsdk.
 	}
 	t.Cleanup(func() { session.Close() })
 
-	result, err := session.ListTools(ctx, nil)
+	return session
+}
+
+// listTools registers every tool the way a client sees them: over a real MCP
+// session, so the schemas are the ones that would reach one.
+func listTools(t *testing.T, ctx context.Context, s *Server) map[string]*mcpsdk.Tool {
+	t.Helper()
+
+	result, err := newTestSession(t, ctx, s).ListTools(ctx, nil)
 	if err != nil {
 		t.Fatalf("listing tools: %v", err)
 	}
@@ -911,6 +923,24 @@ func listTools(t *testing.T, ctx context.Context, s *Server) map[string]*mcpsdk.
 		tools[tool.Name] = tool
 	}
 	return tools
+}
+
+// callTool calls one the way a client would, which is the only way to see what
+// a client would get.
+//
+// Everything else in this file calls the handler, and there is a whole layer
+// between the two: the SDK marshals the typed answer, validates it against the
+// output schema the tool declared, and fills the text content from it. A
+// handler test cannot see any of that — which is why both of the defects found
+// by hand yesterday were invisible to this suite and obvious over a socket.
+func callTool(t *testing.T, ctx context.Context, session *mcpsdk.ClientSession, name string, args any) *mcpsdk.CallToolResult {
+	t.Helper()
+
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("calling %s: %v", name, err)
+	}
+	return result
 }
 
 func jsonObject(v any) (map[string]any, bool) {
