@@ -466,4 +466,6 @@ Transport is not on that list any more: a client that only speaks stdio can use
 
 ## Licence
 
-Apache-2.0, the same as Ebitengine.
+MIT. Ebitengine is Apache-2.0 and stays that way: it is a dependency rather
+than something this repository ships, so it carries its own terms wherever you
+get it from.
