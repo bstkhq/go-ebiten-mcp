@@ -268,6 +268,10 @@ func (c *control) launch() (<-chan error, *tailWriter, error) {
 
 	cmd := exec.Command(self, args...)
 
+	// Its own process group, so that stopping it stops the game it starts and
+	// the display it started for it. See process_unix.go.
+	newProcessGroup(cmd)
+
 	// Never stdout: that is this server's transport. Kept as well as passed on,
 	// so that whatever the game says on its way down is something a tool can
 	// answer with rather than something in a log file.
@@ -315,7 +319,13 @@ func (c *control) stop(_ context.Context, _ *mcpsdk.CallToolRequest, _ emptyInpu
 			"and one that was already running is not ours to stop")
 	}
 
-	c.game.Process.Kill()
+	// SIGTERM to the group, so `ebitenmcp run` can take down the display it
+	// started and the game underneath it. Killing the wrapper outright — which
+	// is what this used to do — left both running while answering that the game
+	// had stopped.
+	game := c.game
+	terminateGroup(game)
+
 	c.game, c.out = nil, nil
 	c.exited, c.exitErr = false, nil
 
@@ -326,7 +336,36 @@ func (c *control) stop(_ context.Context, _ *mcpsdk.CallToolRequest, _ emptyInpu
 		c.proxy.disconnect()
 	}
 
-	return nil, map[string]any{"running": false}, nil
+	// Insist, but only after giving it a chance. The wrapper needs those moments
+	// to stop the container it may have started; killing it immediately is how
+	// an X server outlives every game that used it.
+	stopped := waitFor(game, stopGrace)
+	if !stopped {
+		killGroup(game)
+	}
+
+	return nil, map[string]any{"running": false, "graceful": stopped}, nil
+}
+
+// stopGrace is how long the wrapper gets to take its display down.
+const stopGrace = 5 * time.Second
+
+// waitFor reports whether the process ended within the grace period. The exit is
+// collected by the watcher goroutine launched in launch, so this only watches
+// for the process to disappear rather than reaping it a second time.
+func waitFor(cmd *exec.Cmd, grace time.Duration) bool {
+	if cmd == nil || cmd.Process == nil {
+		return true
+	}
+
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if cmd.ProcessState != nil {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 // refreshProxy re-reads the game's tool list, which is the one moment it can

@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -273,7 +274,7 @@ func startXvfb(opts runOptions) (string, func(), error) {
 	}
 
 	cmd := exec.Command("Xvfb", display,
-		"-screen", "0", fmt.Sprintf("%sx%sx24", width, height),
+		"-screen", "0", fmt.Sprintf("%dx%dx24", width, height),
 		"-nolisten", "tcp")
 	cmd.Stderr = os.Stderr
 
@@ -321,7 +322,7 @@ func startWeston(opts runOptions) (string, func(), error) {
 
 	cmd := exec.Command("weston",
 		"--backend=headless", "--renderer=gl", "--xwayland",
-		"--width="+width, "--height="+height)
+		fmt.Sprintf("--width=%d", width), fmt.Sprintf("--height=%d", height))
 
 	logs, err := cmd.StderrPipe()
 	if err != nil {
@@ -403,10 +404,39 @@ func freeDisplay() (string, error) {
 	return "", fmt.Errorf("no free display number between :51 and :99")
 }
 
-func splitScreen(screen string) (width, height string, err error) {
-	width, height, ok := strings.Cut(screen, "x")
-	if !ok || width == "" || height == "" {
-		return "", "", fmt.Errorf("screen size %q should look like 1280x720", screen)
+// splitScreen parses a screen size into two numbers.
+//
+// Numbers, not the two halves of the string. They end up interpolated into a
+// shell script that runs inside the container — `sh -c "... --height=%s"` — so a
+// screen of "1280x720; anything" used to be a command, and x_start takes this
+// argument from an MCP call. Parsing it is the fix; quoting it would be a
+// promise about somebody else's shell.
+func splitScreen(screen string) (width, height int, err error) {
+	w, h, ok := strings.Cut(screen, "x")
+	if !ok {
+		return 0, 0, fmt.Errorf("screen size %q should look like 1280x720", screen)
+	}
+
+	if width, err = screenAxis(w); err != nil {
+		return 0, 0, fmt.Errorf("screen width in %q: %w", screen, err)
+	}
+	if height, err = screenAxis(h); err != nil {
+		return 0, 0, fmt.Errorf("screen height in %q: %w", screen, err)
 	}
 	return width, height, nil
+}
+
+// maxScreenAxis is past any real display and well short of anything that would
+// ask the X server for an unreasonable allocation.
+const maxScreenAxis = 16384
+
+func screenAxis(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a number", s)
+	}
+	if n < 1 || n > maxScreenAxis {
+		return 0, fmt.Errorf("%d is out of range 1..%d", n, maxScreenAxis)
+	}
+	return n, nil
 }

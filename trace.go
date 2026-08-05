@@ -2,6 +2,7 @@ package ebitenmcp
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -160,22 +161,51 @@ func (t *traceRing) stop() {
 	}
 }
 
+// maxKeptLine is how much of one line is worth remembering. The line itself is
+// passed on whole; only the copy kept for an agent is cut.
+const maxKeptLine = 8 << 10
+
+// pump forwards everything and keeps what it can.
+//
+// It reads rather than scans, and the difference is the whole function.
+// bufio.Scanner gives up on a line longer than its buffer and returns false, and
+// this goroutine is the only thing draining a pipe that *is* descriptors 1 and
+// 2 — so once it stopped, the pipe filled, and the next Print blocked forever.
+// Inside Update that is the game frozen, by a log line, with the loop apparently
+// alive and nothing to say why.
+//
+// So nothing here may stop reading short of EOF, and nothing may be dropped on
+// the way to the terminal: a developer watching it must see their own output
+// whole. Only what is stored is bounded.
 func (t *traceRing) pump(r io.Reader, passthrough io.Writer, name string, tick func() int64) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReaderSize(r, 64*1024)
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, err := reader.ReadString('\n')
 
-		// The terminal gets it untouched, escapes and all. Only what is kept for
-		// an agent is stripped, because there the colour is not colour: it is
-		// half a dozen unreadable bytes per line, in a context window somebody
-		// is paying for.
-		if passthrough != nil {
-			io.WriteString(passthrough, line+"\n")
+		if len(line) > 0 {
+			// The terminal gets it untouched, escapes and all. Only what is kept
+			// for an agent is stripped, because there the colour is not colour:
+			// it is half a dozen unreadable bytes per line, in a context window
+			// somebody is paying for.
+			if passthrough != nil {
+				io.WriteString(passthrough, line)
+			}
+			t.add(name, keep(strings.TrimSuffix(line, "\n")), tick())
 		}
-		t.add(name, stripANSI(line), tick())
+
+		if err != nil {
+			return
+		}
 	}
+}
+
+func keep(line string) string {
+	line = stripANSI(line)
+	if len(line) <= maxKeptLine {
+		return line
+	}
+	return line[:maxKeptLine] + fmt.Sprintf(" …[%d more bytes]", len(line)-maxKeptLine)
 }
 
 // stripANSI removes terminal control sequences.

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hajimehoshi/ebiten/v2"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -535,6 +536,48 @@ func TestScriptToolStopsAtTheStepThatFailed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "step 1") {
 		t.Errorf("the error does not say which step failed: %v", err)
+	}
+}
+
+// TestScriptToolReleasesWhatItPressedWhenItFails.
+//
+// The comment above ReleaseAll said a script that left a key held would poison
+// whatever ran next and the failure would look like it belonged there — and then
+// the release only happened when every step succeeded, so exactly that was true
+// of any script that failed after pressing something.
+func TestScriptToolReleasesWhatItPressedWhenItFails(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := testRT.InputError(); err != nil {
+		t.Skipf("input injection is unavailable here: %v", err)
+	}
+
+	// Holds a key, then asks for one that does not exist.
+	_, _, err := s.script(ctx, nil, scriptInput{Steps: []scriptStep{
+		{At: 0, Keys: []string{"arrowdown"}, Hold: 30},
+		{At: 1, Keys: []string{"not-a-key"}},
+	}})
+	if err == nil {
+		t.Fatal("a script with an impossible step reported success")
+	}
+
+	if err := testRT.WaitTicks(ctx, 2); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+
+	var stillDown bool
+	if err := testRT.Do(ctx, func() {
+		stillDown = ebiten.IsKeyPressed(ebiten.KeyArrowDown)
+	}); err != nil {
+		t.Fatalf("reading the key: %v", err)
+	}
+
+	if stillDown {
+		t.Error("the script failed with arrowdown still held, which the next tool would inherit")
 	}
 }
 

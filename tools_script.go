@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hajimehoshi/ebiten/v2"
+
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -74,6 +76,21 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 	defer cancel()
 
 	start := s.rt.Tick()
+
+	// Whatever this script pressed is let go of on the way out, however it
+	// leaves. Releasing only on success — which is what this used to do — meant
+	// a step that failed after pressing a key left it held, and the next tool
+	// inherited it; the failure then looked like it belonged there. Only the
+	// keys this script pressed, because the injector is shared and releasing
+	// everything would drop somebody else's.
+	held := map[ebiten.Key]bool{}
+	defer func() {
+		inj := s.rt.Injector()
+		for k := range held {
+			inj.KeyUp(k)
+		}
+	}()
+
 	var (
 		frames []*Frame
 		log    []map[string]any
@@ -86,7 +103,7 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 			}
 		}
 
-		frame, err := s.runStep(ctx, step)
+		frame, err := s.runStep(ctx, step, held)
 		if err != nil {
 			// Stop rather than carry on. A sequence that continued past a step
 			// that did not happen produces a result that means nothing, and
@@ -104,11 +121,6 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 			frames = append(frames, frame)
 		}
 	}
-
-	// Whatever the script pressed is let go of at the end. A script that left a
-	// key held would poison whatever ran next, and the failure would look like
-	// it belonged to that.
-	s.rt.Injector().ReleaseAll()
 
 	out := map[string]any{
 		"steps":    len(steps),
@@ -141,7 +153,7 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 }
 
 // runStep performs one step and returns the frame if it asked for one.
-func (s *Server) runStep(ctx context.Context, step scriptStep) (*Frame, error) {
+func (s *Server) runStep(ctx context.Context, step scriptStep, held map[ebiten.Key]bool) (*Frame, error) {
 	inj := s.rt.Injector()
 
 	for _, name := range step.Release {
@@ -150,6 +162,7 @@ func (s *Server) runStep(ctx context.Context, step scriptStep) (*Frame, error) {
 			return nil, err
 		}
 		inj.KeyUp(keys[0])
+		delete(held, keys[0])
 	}
 
 	if len(step.Keys) > 0 {
@@ -165,13 +178,14 @@ func (s *Server) runStep(ctx context.Context, step scriptStep) (*Frame, error) {
 
 		for _, k := range keys {
 			inj.KeyDown(k)
+			held[k] = true
 		}
 		if err := s.rt.WaitTicks(ctx, hold); err != nil {
-			inj.ReleaseAll()
 			return nil, err
 		}
 		for _, k := range keys {
 			inj.KeyUp(k)
+			delete(held, k)
 		}
 	}
 

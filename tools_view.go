@@ -205,9 +205,19 @@ func imageResult(img image.Image, art *Artifact, note string, maxSize int, full 
 // game_record
 // ---------------------------------------------------------------------------
 
-// maxRecordFrames is about a minute at sixty a second, and at 720p about 2 GB
-// if every one were kept — which is why `every` exists.
+// maxRecordFrames is a minute at sixty a second. It is a sanity bound on the
+// argument, not the thing that stops a recording running the machine out of
+// memory: 3600 frames at 720p is 12 GiB and at 4K is 111 GiB, so the real limit
+// is recordBudget, counted in bytes once the first frame has said how big a
+// frame is. (An earlier comment here said 2 GB at 720p. It was out by six.)
 const maxRecordFrames = 3600
+
+// recordBudget is what a recording may hold in memory at once.
+//
+// Every frame is kept until the video is written, so this is the number that
+// matters. Generous enough for several seconds of 1080p, small enough that
+// getting the arguments wrong is an answer rather than an OOM kill.
+const recordBudget = 512 << 20
 
 type recordInput struct {
 	Frames  int    `json:"frames,omitempty" jsonschema:"how many drawn frames to record; defaults to 60. Note that a frame is one Draw, which without vsync can happen several times per tick"`
@@ -237,7 +247,7 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 	ctx, cancel := tickBudget(ctx, in.Frames)
 	defer cancel()
 
-	frames, err := s.recordFrames(ctx, stage, in.Frames, in.Every)
+	frames, capped, err := s.recordFrames(ctx, stage, in.Frames, in.Every)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -260,6 +270,10 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 
 	note := fmt.Sprintf("%d frames covering ticks %d to %d",
 		len(frames), frames[0].Tick, frames[len(frames)-1].Tick)
+	if capped != "" {
+		note += "\n" + capped
+		out["capped"] = capped
+	}
 
 	if !in.NoVideo {
 		note += s.attachVideo(ctx, frames, in.Format, out)
@@ -359,26 +373,55 @@ func (in *recordInput) fill() error {
 // Stopping early with something is deliberate: a recording that ran into a crash
 // halfway is exactly the recording somebody wants, and refusing to return it
 // because it is short would throw away the evidence.
-func (s *Server) recordFrames(ctx context.Context, stage Stage, count, every int) ([]*Frame, error) {
+func (s *Server) recordFrames(ctx context.Context, stage Stage, count, every int) ([]*Frame, string, error) {
 	frames := make([]*Frame, 0, count/every+1)
 
+	var (
+		held  int
+		note  string
+		bytes int
+	)
+
 	for i := 0; i < count; i++ {
+		// Skipped frames are skipped before the capture, not after it. Asking
+		// for one and throwing it away still costs a synchronisation with the
+		// GPU and a full-resolution allocation, so `every: 60` used to pay for
+		// sixty frames to keep one.
+		if i%every != 0 {
+			if err := s.rt.WaitTicks(ctx, 1); err != nil {
+				break
+			}
+			continue
+		}
+
 		frame, err := s.rt.CaptureStage(ctx, stage)
 		if err != nil {
 			if len(frames) == 0 {
-				return nil, s.stalled(err)
+				return nil, "", s.stalled(err)
 			}
 			break
 		}
-		if i%every == 0 {
-			frames = append(frames, frame)
+
+		if bytes == 0 {
+			b := frame.Image.Bounds()
+			bytes = b.Dx() * b.Dy() * 4
 		}
+		if held+bytes > recordBudget {
+			note = fmt.Sprintf("stopped at %d frames: %d more would pass the %d MB a recording "+
+				"may hold at %dx%d. Raise `every` to cover the same stretch for less",
+				len(frames), count-i, recordBudget>>20,
+				frame.Image.Bounds().Dx(), frame.Image.Bounds().Dy())
+			break
+		}
+		held += bytes
+
+		frames = append(frames, frame)
 	}
 
 	if len(frames) == 0 {
-		return nil, fmt.Errorf("recorded nothing: the game drew no frames")
+		return nil, "", fmt.Errorf("recorded nothing: the game drew no frames")
 	}
-	return frames, nil
+	return frames, note, nil
 }
 
 // pick spreads n choices evenly across the recording, so the sheet covers the

@@ -154,16 +154,20 @@ func (p *proxy) forward(ctx context.Context, name string, req *mcpsdk.CallToolRe
 		return result, nil
 	}
 
-	// The game may have been restarted under us, in which case the session is a
-	// pipe to a process that is gone. Drop it and give the call one more go
-	// before deciding it really failed.
+	// The session is dropped so the next call reopens it. This call is not
+	// retried, and that is the point.
+	//
+	// A transport error does not mean the server did not act. If what got lost
+	// was the answer to a game_step, a game_reset or a key press, sending it
+	// again applies it twice — and almost nothing here is idempotent. Retrying
+	// is only safe for somebody who knows what they asked for, so the decision
+	// goes back to them with the reason.
 	p.disconnect()
 
-	session, connectErr := p.connect(ctx)
-	if connectErr != nil {
-		return nil, connectErr
-	}
-	return session.CallTool(ctx, &mcpsdk.CallToolParams{Name: name, Arguments: arguments})
+	return nil, fmt.Errorf("%s did not come back from the game: %w\n"+
+		"The connection was dropped and the next call reopens it. This one was not retried, "+
+		"because a lost answer is not the same as a call that never happened: if this tool "+
+		"changes anything, look at game_state before sending it again", name, err)
 }
 
 // connect returns the session to the game, opening one if there is none.

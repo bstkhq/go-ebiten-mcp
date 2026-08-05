@@ -305,7 +305,7 @@ func startXContainer(opts xOptions) (display string, started bool, err error) {
 // is shared. Left alone it therefore tries :0, finds the host's socket already
 // bound, and gives up rather than trying :1. Creating a lock for every socket it
 // can see makes it skip the taken numbers.
-func westonCommand(opts xOptions, width, height string) string {
+func westonCommand(opts xOptions, width, height int) string {
 	renderer := "pixman"
 	if opts.gpu {
 		renderer = "gl"
@@ -317,7 +317,7 @@ for socket in %[1]s/X*; do
     [ -e "$socket" ] || continue
     touch "/tmp/.X${socket##*/X}-lock"
 done
-exec weston --backend=headless --renderer=%[2]s --xwayland --width=%[3]s --height=%[4]s`,
+exec weston --backend=headless --renderer=%[2]s --xwayland --width=%[3]d --height=%[4]d`,
 		x11SocketDir, renderer, width, height)
 }
 
