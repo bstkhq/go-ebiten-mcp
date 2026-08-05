@@ -179,7 +179,7 @@ type inspectInput struct {
 	MaxItems int    `json:"max_items,omitempty" jsonschema:"how many elements to take from each slice or map; defaults to 50"`
 }
 
-func (s *Server) inspect(ctx context.Context, _ *mcpsdk.CallToolRequest, in inspectInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) inspect(ctx context.Context, _ *mcpsdk.CallToolRequest, in inspectInput) (*mcpsdk.CallToolResult, InspectOutput, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
@@ -213,18 +213,14 @@ func (s *Server) inspect(ctx context.Context, _ *mcpsdk.CallToolRequest, in insp
 
 		value, err = limits.At(s.rt.currentGame(), in.Path)
 	}); doErr != nil {
-		return nil, nil, s.stalled(doErr)
+		return nil, InspectOutput{}, s.stalled(doErr)
 	}
 
 	if err != nil {
-		return nil, nil, err
+		return nil, InspectOutput{}, err
 	}
 
-	return nil, map[string]any{
-		"tick":  s.rt.Tick(),
-		"path":  in.Path,
-		"value": value,
-	}, nil
+	return nil, InspectOutput{Tick: s.rt.Tick(), Path: in.Path, Value: value}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -238,17 +234,14 @@ type tracesInput struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"how many lines to return, most recent last; defaults to 200"`
 }
 
-func (s *Server) tracesTool(_ context.Context, _ *mcpsdk.CallToolRequest, in tracesInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) tracesTool(_ context.Context, _ *mcpsdk.CallToolRequest, in tracesInput) (*mcpsdk.CallToolResult, TracesOutput, error) {
 	if in.Limit <= 0 {
 		in.Limit = 200
 	}
 
 	lines := filterTraces(s.traces.Lines(), in.Stream, in.Contains, in.SinceTick, in.Limit)
 
-	return nil, map[string]any{
-		"count": len(lines),
-		"lines": lines,
-	}, nil
+	return nil, TracesOutput{Lines: lines, Total: len(lines), Tick: s.rt.Tick()}, nil
 }
 
 // ---------------------------------------------------------------------------

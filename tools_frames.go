@@ -38,7 +38,7 @@ type framesInput struct {
 // is using it — enable, wait, ask — but each is its own function here, since the
 // read path used to be the body of this one after a switch that returned, which
 // is easy to mistake for something that always runs.
-func (s *Server) frames(_ context.Context, _ *mcpsdk.CallToolRequest, in framesInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) frames(_ context.Context, _ *mcpsdk.CallToolRequest, in framesInput) (*mcpsdk.CallToolResult, FramesOutput, error) {
 	ring := s.rt.Ring()
 
 	switch {
@@ -46,30 +46,30 @@ func (s *Server) frames(_ context.Context, _ *mcpsdk.CallToolRequest, in framesI
 		return s.enableFrames(ring, *in.Enable)
 	case in.Disable:
 		ring.Disable()
-		return nil, map[string]any{"ring": ring.Status()}, nil
+		return nil, FramesOutput{Ring: ring.Status()}, nil
 	default:
 		return s.readFrames(ring, in)
 	}
 }
 
-func (s *Server) enableFrames(ring *frameRing, in ringEnableInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) enableFrames(ring *frameRing, in ringEnableInput) (*mcpsdk.CallToolResult, FramesOutput, error) {
 	stage := Stage(in.Stage)
 	if stage == "" {
 		stage = StageOffscreen
 	}
 	if stage != StageOffscreen && stage != StageFinal {
-		return nil, nil, fmt.Errorf("unknown stage %q: %s", in.Stage, stageDoc)
+		return nil, FramesOutput{}, fmt.Errorf("unknown stage %q: %s", in.Stage, stageDoc)
 	}
 
 	ring.Enable(in.BudgetMB<<20, in.Every, stage)
 
-	return nil, map[string]any{
-		"ring": ring.Status(),
-		"note": "keeping frames now; ask again without enable to get them",
+	return nil, FramesOutput{
+		Ring: ring.Status(),
+		Note: "keeping frames now; ask again without enable to get them",
 	}, nil
 }
 
-func (s *Server) readFrames(ring *frameRing, in framesInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) readFrames(ring *frameRing, in framesInput) (*mcpsdk.CallToolResult, FramesOutput, error) {
 	if in.Last <= 0 {
 		in.Last = 12
 	}
@@ -79,12 +79,11 @@ func (s *Server) readFrames(ring *frameRing, in framesInput) (*mcpsdk.CallToolRe
 
 	kept := ring.Frames(in.Last)
 	if len(kept) == 0 {
-		status := ring.Status()
-		if enabled, _ := status["enabled"].(bool); !enabled {
-			return nil, nil, fmt.Errorf(`nothing is being kept; turn it on with {"enable": {}} ` +
+		if !ring.Status().Enabled {
+			return nil, FramesOutput{}, fmt.Errorf(`nothing is being kept; turn it on with {"enable": {}} ` +
 				"and the frames from then on will be there when you need them")
 		}
-		return nil, nil, fmt.Errorf("nothing kept yet: the game has not drawn since it was enabled")
+		return nil, FramesOutput{}, fmt.Errorf("nothing kept yet: the game has not drawn since it was enabled")
 	}
 
 	// Decoded back into pixels only now, at the moment somebody wants to look.
@@ -98,14 +97,14 @@ func (s *Server) readFrames(ring *frameRing, in framesInput) (*mcpsdk.CallToolRe
 	}
 
 	if len(frames) == 0 {
-		return nil, nil, fmt.Errorf("the kept frames could not be decoded")
+		return nil, FramesOutput{}, fmt.Errorf("the kept frames could not be decoded")
 	}
 
 	sheet := contactSheet(frames, in.Columns)
 
 	art, err := s.media.savePNG("before", sheet)
 	if err != nil {
-		return nil, nil, err
+		return nil, FramesOutput{}, err
 	}
 
 	note := fmt.Sprintf("%d frames, ticks %d to %d",
@@ -113,14 +112,14 @@ func (s *Server) readFrames(ring *frameRing, in framesInput) (*mcpsdk.CallToolRe
 
 	result, _, err := imageResult(sheet, art, note, in.MaxSize, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, FramesOutput{}, err
 	}
 
-	return result, map[string]any{
-		"frames":        len(frames),
-		"first_tick":    frames[0].Tick,
-		"last_tick":     frames[len(frames)-1].Tick,
-		"contact_sheet": art,
-		"ring":          ring.Status(),
+	return result, FramesOutput{
+		Frames:    len(frames),
+		FirstTick: frames[0].Tick,
+		LastTick:  frames[len(frames)-1].Tick,
+		Sheet:     art,
+		Ring:      ring.Status(),
 	}, nil
 }

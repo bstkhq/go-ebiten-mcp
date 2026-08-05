@@ -96,10 +96,10 @@ type screenshotInput struct {
 	Stage       string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
-func (s *Server) screenshot(ctx context.Context, _ *mcpsdk.CallToolRequest, in screenshotInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) screenshot(ctx context.Context, _ *mcpsdk.CallToolRequest, in screenshotInput) (*mcpsdk.CallToolResult, FrameOutput, error) {
 	stage, err := s.stage(in.Stage)
 	if err != nil {
-		return nil, nil, err
+		return nil, FrameOutput{}, err
 	}
 
 	ctx, cancel := withTimeout(ctx)
@@ -107,13 +107,13 @@ func (s *Server) screenshot(ctx context.Context, _ *mcpsdk.CallToolRequest, in s
 
 	if in.WaitTicks > 0 {
 		if err := s.rt.WaitTicks(ctx, in.WaitTicks); err != nil {
-			return nil, nil, s.stalled(err)
+			return nil, FrameOutput{}, s.stalled(err)
 		}
 	}
 
 	frame, err := s.rt.CaptureStage(ctx, stage)
 	if err != nil {
-		return nil, nil, s.stalled(err)
+		return nil, FrameOutput{}, s.stalled(err)
 	}
 
 	return s.frameResult("shot", frame, in.MaxSize, in.FullQuality, "")
@@ -136,10 +136,10 @@ func (s *Server) stage(name string) (Stage, error) {
 
 // frameResult produces the three forms every capture comes in: inline for the
 // conversation, a file for a person, and a URL for a client that renders one.
-func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool, note string) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool, note string) (*mcpsdk.CallToolResult, FrameOutput, error) {
 	art, err := s.media.savePNG(prefix, frame.Image)
 	if err != nil {
-		return nil, nil, err
+		return nil, FrameOutput{}, err
 	}
 
 	text := fmt.Sprintf("tick %d, %dx%d native", frame.Tick, art.Width, art.Height)
@@ -155,14 +155,14 @@ func (s *Server) frameResult(prefix string, frame *Frame, maxSize int, full bool
 
 	result, shown, err := imageResult(frame.Image, art, text, maxSize, full)
 	if err != nil {
-		return nil, nil, err
+		return nil, FrameOutput{}, err
 	}
 
-	return result, map[string]any{
-		"tick":     frame.Tick,
-		"stage":    string(frame.Stage),
-		"artifact": art,
-		"inline":   map[string]int{"width": shown.Dx(), "height": shown.Dy()},
+	return result, FrameOutput{
+		Tick:     frame.Tick,
+		Stage:    frame.Stage,
+		Artifact: art,
+		Inline:   Size{Width: shown.Dx(), Height: shown.Dy()},
 	}, nil
 }
 
@@ -234,13 +234,13 @@ type recordInput struct {
 	Stage       string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
-func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recordInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recordInput) (*mcpsdk.CallToolResult, RecordOutput, error) {
 	stage, err := s.stage(in.Stage)
 	if err != nil {
-		return nil, nil, err
+		return nil, RecordOutput{}, err
 	}
 	if err := in.fill(); err != nil {
-		return nil, nil, err
+		return nil, RecordOutput{}, err
 	}
 
 	// Recording is the one thing that legitimately takes a while, so the budget
@@ -250,38 +250,38 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 
 	frames, capped, err := s.recordFrames(ctx, stage, in.Frames, in.Every)
 	if err != nil {
-		return nil, nil, err
+		return nil, RecordOutput{}, err
 	}
 
 	sheet := contactSheet(pick(frames, in.Cells), in.Columns)
 
 	sheetArt, err := s.media.savePNG("sheet", sheet)
 	if err != nil {
-		return nil, nil, err
+		return nil, RecordOutput{}, err
 	}
 
-	out := map[string]any{
-		"frames":        len(frames),
-		"stage":         string(stage),
-		"first_tick":    frames[0].Tick,
-		"last_tick":     frames[len(frames)-1].Tick,
-		"ticks_covered": frames[len(frames)-1].Tick - frames[0].Tick,
-		"contact_sheet": sheetArt,
+	out := RecordOutput{
+		Frames:       len(frames),
+		Stage:        stage,
+		FirstTick:    frames[0].Tick,
+		LastTick:     frames[len(frames)-1].Tick,
+		TicksCovered: frames[len(frames)-1].Tick - frames[0].Tick,
+		Sheet:        sheetArt,
 	}
 
 	note := fmt.Sprintf("%d frames covering ticks %d to %d",
 		len(frames), frames[0].Tick, frames[len(frames)-1].Tick)
 	if capped != "" {
 		note += "\n" + capped
-		out["capped"] = capped
+		out.Capped = capped
 	}
 
 	if !in.NoVideo {
-		note += s.attachVideo(ctx, frames, in.Format, out)
+		note += s.attachVideo(ctx, frames, in.Format, &out)
 	}
 
 	if in.Inline == "gif" {
-		result, why := inlineGif(out, note, sheetArt)
+		result, why := inlineGif(out.Video, note, sheetArt)
 		if result != nil {
 			return result, out, nil
 		}
@@ -290,7 +290,7 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 
 	result, _, err := imageResult(sheet, sheetArt, note, in.MaxSize, in.FullQuality)
 	if err != nil {
-		return nil, nil, err
+		return nil, RecordOutput{}, err
 	}
 	return result, out, nil
 }
@@ -298,13 +298,13 @@ func (s *Server) record(ctx context.Context, _ *mcpsdk.CallToolRequest, in recor
 // attachVideo writes the video and returns what to add to the note. A failure
 // to encode is a line in the answer rather than a failed call: the frames are
 // the point, and the contact sheet already has them.
-func (s *Server) attachVideo(ctx context.Context, frames []*Frame, format string, out map[string]any) string {
+func (s *Server) attachVideo(ctx context.Context, frames []*Frame, format string, out *RecordOutput) string {
 	video, err := s.saveVideo(ctx, frames, format)
 	if err != nil {
 		return "\nno video: " + err.Error()
 	}
 
-	out["video"] = video
+	out.Video = video
 
 	note := "\nvideo: " + video.Path
 	if video.URL != "" {
@@ -319,9 +319,8 @@ func (s *Server) attachVideo(ctx context.Context, frames []*Frame, format string
 // Where a client does animate one it beats a grid of stills at showing motion;
 // where one does not it shows a single frame, and then the contact sheet is the
 // better answer. Which is why this is asked for rather than assumed.
-func inlineGif(out map[string]any, note string, sheet *Artifact) (*mcpsdk.CallToolResult, string) {
-	video, ok := out["video"].(*Artifact)
-	if !ok || video.Kind != "gif" {
+func inlineGif(video *Artifact, note string, sheet *Artifact) (*mcpsdk.CallToolResult, string) {
+	if video == nil || video.Kind != "gif" {
 		return nil, "\nno gif was produced, so the contact sheet is what came back"
 	}
 
@@ -451,10 +450,10 @@ type compareInput struct {
 	Stage string `json:"stage,omitempty" jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"`
 }
 
-func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in compareInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in compareInput) (*mcpsdk.CallToolResult, CompareOutput, error) {
 	stage, err := s.stage(in.Stage)
 	if err != nil {
-		return nil, nil, err
+		return nil, CompareOutput{}, err
 	}
 
 	if in.WaitTicks <= 0 {
@@ -466,16 +465,16 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 
 	before, err := s.rt.CaptureStage(ctx, stage)
 	if err != nil {
-		return nil, nil, s.stalled(err)
+		return nil, CompareOutput{}, s.stalled(err)
 	}
 
 	if err := s.rt.WaitTicks(ctx, in.WaitTicks); err != nil {
-		return nil, nil, s.stalled(err)
+		return nil, CompareOutput{}, s.stalled(err)
 	}
 
 	after, err := s.rt.CaptureStage(ctx, stage)
 	if err != nil {
-		return nil, nil, s.stalled(err)
+		return nil, CompareOutput{}, s.stalled(err)
 	}
 
 	comparison, changed := compareImages(before.Image, after.Image)
@@ -483,7 +482,7 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 		// The screen changed size between the two captures, so there is no
 		// per-pixel difference to report. Saying so beats the -1 that used to
 		// come back and be printed as a negative percentage.
-		return nil, nil, fmt.Errorf("the screen changed size between the two captures, "+
+		return nil, CompareOutput{}, fmt.Errorf("the screen changed size between the two captures, "+
 			"from %v to %v, so there is nothing to compare pixel by pixel. "+
 			"Take them again once it has settled",
 			before.Image.Bounds(), after.Image.Bounds())
@@ -491,7 +490,7 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 
 	art, err := s.media.savePNG("compare", comparison)
 	if err != nil {
-		return nil, nil, err
+		return nil, CompareOutput{}, err
 	}
 
 	total := before.Image.Bounds().Dx() * before.Image.Bounds().Dy()
@@ -500,15 +499,15 @@ func (s *Server) compare(ctx context.Context, _ *mcpsdk.CallToolRequest, in comp
 
 	result, _, err := imageResult(comparison, art, note, in.MaxSize, in.FullQuality)
 	if err != nil {
-		return nil, nil, err
+		return nil, CompareOutput{}, err
 	}
 
-	return result, map[string]any{
-		"before_tick":    before.Tick,
-		"after_tick":     after.Tick,
-		"changed_pixels": changed,
-		"total_pixels":   total,
-		"artifact":       art,
+	return result, CompareOutput{
+		BeforeTick:    before.Tick,
+		AfterTick:     after.Tick,
+		ChangedPixels: changed,
+		TotalPixels:   total,
+		Artifact:      art,
 	}, nil
 }
 

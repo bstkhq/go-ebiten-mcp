@@ -55,7 +55,7 @@ func TestRingKeepsSamplingAfterADroppedFrame(t *testing.T) {
 		t.Error("accepted a frame with no room for it")
 	}
 
-	if status := ring.Status(); status["dropped"].(int64) == 0 {
+	if ring.Status().Dropped == 0 {
 		t.Error("a refused frame was not counted as dropped")
 	}
 }

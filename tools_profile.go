@@ -35,7 +35,7 @@ type profileInput struct {
 	Full    bool   `json:"full,omitempty" jsonschema:"summarise by call graph rather than by function, which is longer and shows who called what"`
 }
 
-func (s *Server) profile(ctx context.Context, _ *mcpsdk.CallToolRequest, in profileInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) profile(ctx context.Context, _ *mcpsdk.CallToolRequest, in profileInput) (*mcpsdk.CallToolResult, ProfileOutput, error) {
 	if in.Kind == "" {
 		in.Kind = "cpu"
 	}
@@ -46,7 +46,7 @@ func (s *Server) profile(ctx context.Context, _ *mcpsdk.CallToolRequest, in prof
 	// whole duration: one that ran for a day would block this handler and make
 	// every later game_profile fail with "only one can run at a time".
 	if in.Seconds > maxProfileSeconds {
-		return nil, nil, fmt.Errorf("a %ds profile would hold the profiler that long and block "+
+		return nil, ProfileOutput{}, fmt.Errorf("a %ds profile would hold the profiler that long and block "+
 			"every other one; the limit is %ds", in.Seconds, maxProfileSeconds)
 	}
 	if in.Lines <= 0 {
@@ -59,25 +59,21 @@ func (s *Server) profile(ctx context.Context, _ *mcpsdk.CallToolRequest, in prof
 
 	data, err := s.collectProfile(ctx, in)
 	if err != nil {
-		return nil, nil, err
+		return nil, ProfileOutput{}, err
 	}
 
 	art, err := s.media.save("profile-"+in.Kind, "pprof", data, 0, 0)
 	if err != nil {
-		return nil, nil, err
+		return nil, ProfileOutput{}, err
 	}
 
-	out := map[string]any{
-		"kind":     in.Kind,
-		"artifact": art,
-		"tick":     s.rt.Tick(),
-	}
+	out := ProfileOutput{Kind: in.Kind, Artifact: art, Tick: s.rt.Tick()}
 
 	// The summary is the point. A pprof file is an artifact for a person with
 	// the right tool; twenty lines naming the functions is an answer.
 	summary, err := summariseProfile(ctx, art.Path, in)
 	if err != nil {
-		out["note"] = "could not summarise it: " + err.Error() +
+		out.Note = "could not summarise it: " + err.Error() +
 			". The file is still there: open it with `go tool pprof " + art.Path + "`"
 		return nil, out, nil
 	}

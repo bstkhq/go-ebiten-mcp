@@ -56,12 +56,12 @@ type scriptInput struct {
 	MaxSize int          `json:"max_size,omitempty" jsonschema:"longest side of the inline contact sheet in pixels; defaults to 1024"`
 }
 
-func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scriptInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scriptInput) (*mcpsdk.CallToolResult, ScriptOutput, error) {
 	if err := s.requireInput(); err != nil {
-		return nil, nil, err
+		return nil, ScriptOutput{}, err
 	}
 	if len(in.Steps) == 0 {
-		return nil, nil, fmt.Errorf("a script needs steps")
+		return nil, ScriptOutput{}, fmt.Errorf("a script needs steps")
 	}
 	if in.Columns <= 0 {
 		in.Columns = 4
@@ -93,13 +93,13 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 
 	var (
 		frames []*Frame
-		log    []map[string]any
+		log    []ScriptStep
 	)
 
 	for i, step := range steps {
 		if wait := int64(step.At) - (s.rt.Tick() - start); wait > 0 {
 			if err := s.rt.WaitTicks(ctx, int(wait)); err != nil {
-				return nil, nil, s.stalled(err)
+				return nil, ScriptOutput{}, s.stalled(err)
 			}
 		}
 
@@ -108,26 +108,22 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 			// Stop rather than carry on. A sequence that continued past a step
 			// that did not happen produces a result that means nothing, and
 			// hides which step was the problem.
-			return nil, nil, fmt.Errorf("step %d (at tick %d) failed: %w", i, step.At, err)
+			return nil, ScriptOutput{}, fmt.Errorf("step %d (at tick %d) failed: %w", i, step.At, err)
 		}
 
-		entry := map[string]any{"step": i, "at": step.At, "tick": s.rt.Tick()}
-		if step.Label != "" {
-			entry["label"] = step.Label
-		}
-		log = append(log, entry)
+		log = append(log, ScriptStep{Step: i, At: step.At, Tick: s.rt.Tick(), Label: step.Label})
 
 		if frame != nil {
 			frames = append(frames, frame)
 		}
 	}
 
-	out := map[string]any{
-		"steps":    len(steps),
-		"ticks":    s.rt.Tick() - start,
-		"log":      log,
-		"tick":     s.rt.Tick(),
-		"captured": len(frames),
+	out := ScriptOutput{
+		Steps:    len(steps),
+		Ticks:    s.rt.Tick() - start,
+		Log:      log,
+		Tick:     s.rt.Tick(),
+		Captured: len(frames),
 	}
 
 	if len(frames) == 0 {
@@ -138,16 +134,16 @@ func (s *Server) script(ctx context.Context, _ *mcpsdk.CallToolRequest, in scrip
 
 	art, err := s.media.savePNG("script", sheet)
 	if err != nil {
-		return nil, nil, err
+		return nil, ScriptOutput{}, err
 	}
-	out["contact_sheet"] = art
+	out.Sheet = art
 
 	note := fmt.Sprintf("%d steps over %d ticks, %d frames captured",
 		len(steps), s.rt.Tick()-start, len(frames))
 
 	result, _, err := imageResult(sheet, art, note, in.MaxSize, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, ScriptOutput{}, err
 	}
 	return result, out, nil
 }

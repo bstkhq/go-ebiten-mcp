@@ -326,31 +326,31 @@ func (r *frameRing) Frames(n int) []ringFrame {
 
 // Status is what game_state reports, so a buffer throwing away half of what it
 // is given is visible rather than something to be deduced from tick numbers.
-func (r *frameRing) Status() map[string]any {
+func (r *frameRing) Status() RingStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if !r.enabled {
-		return map[string]any{"enabled": false}
+		return RingStatus{Enabled: false}
 	}
 
-	status := map[string]any{
-		"enabled":   true,
-		"frames":    len(r.frames),
-		"memory_mb": round2(float64(r.bytes) / (1 << 20)),
-		"budget_mb": round2(float64(r.budget) / (1 << 20)),
-		"every":     r.every,
-		"stage":     string(r.stage),
-		"encoded":   r.encoded,
-		"dropped":   r.dropped,
+	status := RingStatus{
+		Enabled:  true,
+		Frames:   len(r.frames),
+		MemoryMB: round2(float64(r.bytes) / (1 << 20)),
+		BudgetMB: round2(float64(r.budget) / (1 << 20)),
+		Every:    r.every,
+		Stage:    r.stage,
+		Encoded:  r.encoded,
+		Dropped:  r.dropped,
 	}
 
 	if len(r.frames) > 0 {
-		status["oldest_tick"] = r.frames[0].Tick
-		status["newest_tick"] = r.frames[len(r.frames)-1].Tick
+		status.OldestTick = r.frames[0].Tick
+		status.NewestTick = r.frames[len(r.frames)-1].Tick
 	}
 	if r.dropped > 0 {
-		status["note"] = fmt.Sprintf("the encoder could not keep up with %d frames; "+
+		status.Note = fmt.Sprintf("the encoder could not keep up with %d frames; "+
 			"raise every to sample less often", r.dropped)
 	}
 	return status

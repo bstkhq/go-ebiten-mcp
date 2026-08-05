@@ -53,21 +53,21 @@ func (s *Server) addLoopTools(srv *mcpsdk.Server) {
 
 type emptyInput struct{}
 
-func (s *Server) pause(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) pause(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*mcpsdk.CallToolResult, LoopOutput, error) {
 	s.rt.Pause()
-	return nil, map[string]any{"paused": true, "tick": s.rt.Tick()}, nil
+	return nil, LoopOutput{Paused: true, Tick: s.rt.Tick()}, nil
 }
 
-func (s *Server) resume(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) resume(context.Context, *mcpsdk.CallToolRequest, emptyInput) (*mcpsdk.CallToolResult, LoopOutput, error) {
 	s.rt.Resume()
-	return nil, map[string]any{"paused": false, "tick": s.rt.Tick()}, nil
+	return nil, LoopOutput{Paused: false, Tick: s.rt.Tick()}, nil
 }
 
 type stepInput struct {
 	Ticks int `json:"ticks,omitempty" jsonschema:"how many ticks to run; defaults to 1"`
 }
 
-func (s *Server) step(ctx context.Context, _ *mcpsdk.CallToolRequest, in stepInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) step(ctx context.Context, _ *mcpsdk.CallToolRequest, in stepInput) (*mcpsdk.CallToolResult, LoopOutput, error) {
 	if in.Ticks <= 0 {
 		in.Ticks = 1
 	}
@@ -81,13 +81,13 @@ func (s *Server) step(ctx context.Context, _ *mcpsdk.CallToolRequest, in stepInp
 	s.rt.Step(in.Ticks)
 
 	if err := s.rt.WaitTicks(ctx, in.Ticks); err != nil {
-		return nil, nil, s.stalled(err)
+		return nil, LoopOutput{}, s.stalled(err)
 	}
 
-	return nil, map[string]any{
-		"tick":     s.rt.Tick(),
-		"advanced": s.rt.Tick() - before,
-		"paused":   true,
+	return nil, LoopOutput{
+		Tick:   s.rt.Tick(),
+		Ran:    s.rt.Tick() - before,
+		Paused: true,
 	}, nil
 }
 
@@ -116,7 +116,7 @@ type waitInput struct {
 // wait is the difference between polling a game and asking it a question. A
 // condition on a state path is what makes a test written through these tools
 // deterministic rather than a sequence of sleeps.
-func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInput) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInput) (*mcpsdk.CallToolResult, WaitOutput, error) {
 	if in.Path == "" {
 		if in.Ticks <= 0 {
 			in.Ticks = 1
@@ -127,16 +127,16 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 
 		start := time.Now()
 		if err := s.rt.WaitTicks(ctx, in.Ticks); err != nil {
-			return nil, nil, s.stalled(err)
+			return nil, WaitOutput{}, s.stalled(err)
 		}
-		return nil, map[string]any{
-			"tick":   s.rt.Tick(),
-			"waited": time.Since(start).String(),
+		return nil, WaitOutput{
+			Tick:   s.rt.Tick(),
+			Waited: time.Since(start).String(),
 		}, nil
 	}
 
 	if in.Equals == nil && !in.Changed {
-		return nil, nil, fmt.Errorf("waiting on %s needs something to wait for: "+
+		return nil, WaitOutput{}, fmt.Errorf("waiting on %s needs something to wait for: "+
 			"equals, or changed", in.Path)
 	}
 	if in.Timeout <= 0 {
@@ -148,7 +148,7 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 
 	first, err := s.pathValue(ctx, in.Path)
 	if err != nil {
-		return nil, nil, err
+		return nil, WaitOutput{}, err
 	}
 
 	// One more read than there are ticks: the loop below checks, then waits, so
@@ -159,14 +159,14 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 	for i := 0; i <= in.Timeout; i++ {
 		value, err := s.pathValue(ctx, in.Path)
 		if err != nil {
-			return nil, nil, err
+			return nil, WaitOutput{}, err
 		}
 
 		switch {
 		case in.Equals != nil && fmt.Sprint(value) == *in.Equals:
-			return nil, map[string]any{"tick": s.rt.Tick(), "value": value, "matched": "equals"}, nil
+			return nil, WaitOutput{Tick: s.rt.Tick(), Value: value, Matched: "equals"}, nil
 		case in.Changed && fmt.Sprint(value) != fmt.Sprint(first):
-			return nil, map[string]any{"tick": s.rt.Tick(), "value": value, "was": first, "matched": "changed"}, nil
+			return nil, WaitOutput{Tick: s.rt.Tick(), Value: value, Was: first, Matched: "changed"}, nil
 		}
 
 		if i == in.Timeout {
@@ -174,11 +174,11 @@ func (s *Server) wait(ctx context.Context, _ *mcpsdk.CallToolRequest, in waitInp
 		}
 
 		if err := s.rt.WaitTicks(ctx, 1); err != nil {
-			return nil, nil, s.stalled(err)
+			return nil, WaitOutput{}, s.stalled(err)
 		}
 	}
 
-	return nil, nil, fmt.Errorf("%s did not %s within %d ticks",
+	return nil, WaitOutput{}, fmt.Errorf("%s did not %s within %d ticks",
 		in.Path, condition(in), in.Timeout)
 }
 

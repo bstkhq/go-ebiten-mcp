@@ -24,6 +24,27 @@ import (
 // the handlers are called directly, against the same live game the rest of the
 // file drives.
 
+// untypedOutput are the tools whose answers are still maps.
+//
+// Not an oversight in the same way as the others: each of these returns
+// something genuinely shaped by what it found — the whole process for
+// game_state, whatever gamepads exist for game_input_state — and typing them is
+// a design question about what the contract should be rather than a
+// transcription. Kept as a list so the number is visible and can only go down.
+var untypedOutput = map[string]bool{
+	"game_state":       true,
+	"game_frametimes":  true,
+	"game_goroutines":  true,
+	"game_input_state": true,
+	"game_gamepad":     true,
+	"game_key":         true,
+	"game_type":        true,
+	"game_mouse":       true,
+	"game_touch":       true,
+	"game_set_tps":     true,
+	"game_reset":       true,
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
@@ -80,6 +101,18 @@ func TestEveryToolIsWellFormed(t *testing.T) {
 		}
 		if tool.Annotations == nil || tool.Annotations.Title == "" {
 			t.Errorf("%s has no title annotation", name)
+		}
+
+		// An output schema is what makes a result something a client can check
+		// rather than a map it has to guess at, and the SDK derives it from the
+		// handler's return type — so a tool without one is a tool still
+		// answering with map[string]any. The list below is what is left; it may
+		// shrink and must not grow.
+		if tool.OutputSchema == nil && !untypedOutput[name] {
+			t.Errorf("%s has no output schema: its handler still returns an untyped map", name)
+		}
+		if tool.OutputSchema != nil && untypedOutput[name] {
+			t.Errorf("%s has an output schema now — take it off the untyped list", name)
 		}
 	}
 
@@ -180,8 +213,11 @@ func TestScreenshotToolReturnsBothStages(t *testing.T) {
 			t.Fatalf("game_screenshot at %s: %v", stage, err)
 		}
 
-		if got := out.(map[string]any)["stage"]; got != stage {
-			t.Errorf("asked for %s and the result says %v", stage, got)
+		if string(out.Stage) != stage {
+			t.Errorf("asked for %s and the result says %v", stage, out.Stage)
+		}
+		if out.Artifact == nil || out.Inline.Width == 0 {
+			t.Errorf("the result describes no file or no inline size: %+v", out)
 		}
 
 		image, text := splitContent(t, result)
@@ -242,7 +278,7 @@ func TestInspectToolReadsUnexportedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("game_inspect: %v", err)
 	}
-	if got := out.(map[string]any)["value"]; got == nil {
+	if out.Value == nil {
 		t.Errorf("game_inspect returned nothing for an unexported field")
 	}
 }
@@ -267,9 +303,9 @@ func TestInspectToolReturnsARegisteredSnapshot(t *testing.T) {
 		t.Fatalf("game_inspect on a registered snapshot: %v", err)
 	}
 
-	value, ok := out.(map[string]any)["value"].(map[string]any)
+	value, ok := out.Value.(map[string]any)
 	if !ok {
-		t.Fatalf("the snapshot came back as %#v", out.(map[string]any)["value"])
+		t.Fatalf("the snapshot came back as %#v", out.Value)
 	}
 	if value["answer"] != int64(42) && value["answer"] != 42 {
 		t.Errorf("the snapshot holds %v, want 42", value["answer"])
@@ -406,7 +442,7 @@ func TestTracesToolReturnsWhatTheProcessPrinted(t *testing.T) {
 		t.Fatalf("game_traces: %v", err)
 	}
 
-	lines := out.(map[string]any)["lines"].([]TraceLine)
+	lines := out.Lines
 	if len(lines) != 1 {
 		t.Fatalf("filtering for 'hello' returned %d lines, want 1", len(lines))
 	}
@@ -420,7 +456,7 @@ func TestTracesToolReturnsWhatTheProcessPrinted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("game_traces filtered by stream: %v", err)
 	}
-	for _, l := range out.(map[string]any)["lines"].([]TraceLine) {
+	for _, l := range out.Lines {
 		if l.Stream != "stderr" {
 			t.Errorf("filtering for stderr returned a %s line", l.Stream)
 		}
@@ -450,7 +486,7 @@ func TestFramesToolKeepsWhatCameBefore(t *testing.T) {
 		t.Fatalf("reading game_frames: %v", err)
 	}
 
-	kept := out.(map[string]any)["frames"].(int)
+	kept := out.Frames
 	if kept == 0 {
 		t.Fatal("the buffer was enabled and kept nothing")
 	}
@@ -503,12 +539,11 @@ func TestScriptToolRunsASequence(t *testing.T) {
 		t.Fatalf("game_script: %v", err)
 	}
 
-	log := out.(map[string]any)
-	if log["steps"] != 3 {
-		t.Errorf("the script reported %v steps, want 3", log["steps"])
+	if out.Steps != 3 {
+		t.Errorf("the script reported %v steps, want 3", out.Steps)
 	}
-	if log["captured"] != 1 {
-		t.Errorf("the script captured %v frames, want the one it was asked for", log["captured"])
+	if out.Captured != 1 {
+		t.Errorf("the script captured %v frames, want the one it was asked for", out.Captured)
 	}
 }
 
@@ -622,12 +657,11 @@ func TestCompareToolShowsWhatChanged(t *testing.T) {
 		t.Fatalf("game_compare: %v", err)
 	}
 
-	result := out.(map[string]any)
-	if result["changed_pixels"].(int) != 0 {
-		t.Errorf("a still game compared as %v changed pixels", result["changed_pixels"])
+	if out.ChangedPixels != 0 {
+		t.Errorf("a still game compared as %v changed pixels", out.ChangedPixels)
 	}
-	if result["total_pixels"].(int) != 64*48 {
-		t.Errorf("compared %v pixels, want the game's own 64x48", result["total_pixels"])
+	if out.TotalPixels != 64*48 {
+		t.Errorf("compared %v pixels, want the game's own 64x48", out.TotalPixels)
 	}
 }
 
