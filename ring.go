@@ -43,6 +43,9 @@ type ringFrame struct {
 }
 
 type frameRing struct {
+	// lifecycle serialises Enable and Disable end to end; mu guards the fields.
+	lifecycle sync.Mutex
+
 	mu sync.Mutex
 
 	enabled bool
@@ -75,14 +78,24 @@ func newFrameRing() *frameRing {
 	return &frameRing{every: 1, budget: defaultRingBudget, stage: StageOffscreen}
 }
 
+// Enabled reports whether frames are being kept.
+func (r *frameRing) Enabled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.enabled
+}
+
 // Stage is which stage the ring keeps.
 //
 // The offscreen, unless asked otherwise, and that default is about cost rather
 // than fidelity: this is the one thing here that captures continuously, and on a
 // game with a final pass the difference is the logical resolution against the
-// window's — thirteen times the bytes off the GPU and through the encoder, for
-// every frame, for as long as it is on. A screenshot pays that once; a buffer
-// running for ten minutes pays it thirty-six thousand times.
+// window's. That is the scale factor squared — four times the pixels at double
+// size, around thirteen for a 480x320 game filling a 1080p screen — off the GPU
+// and through the encoder, for every frame, for as long as it is on. A
+// screenshot pays it once; a buffer running for ten minutes pays it thirty-six
+// thousand times.
 func (r *frameRing) Stage() Stage {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -91,8 +104,17 @@ func (r *frameRing) Stage() Stage {
 }
 
 // Enable starts keeping frames, replacing whatever was kept before.
+//
+// Serialised against itself and against Disable. Two enables arriving together
+// could each see nothing running, each install their own channels, and each
+// start an encoder — one of which would then sit for the life of the process on
+// a stop that will never be closed, holding a queue of full-resolution frames.
+// MCP calls are concurrent, so "two at once" is a client being ordinary.
 func (r *frameRing) Enable(budget, every int, stage Stage) {
-	r.Disable()
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+
+	r.disable()
 
 	if budget <= 0 {
 		budget = defaultRingBudget
@@ -119,6 +141,14 @@ func (r *frameRing) Enable(budget, every int, stage Stage) {
 
 // Disable stops keeping frames and lets go of the ones it had.
 func (r *frameRing) Disable() {
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+
+	r.disable()
+}
+
+// disable is the body, for callers that already hold lifecycle.
+func (r *frameRing) disable() {
 	r.mu.Lock()
 	if !r.enabled {
 		r.mu.Unlock()

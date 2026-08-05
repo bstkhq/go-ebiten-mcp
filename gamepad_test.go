@@ -7,7 +7,6 @@ import (
 
 	"github.com/bstkhq/go-ebiten-mcp/internal/uinput"
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/inpututil"
 )
 
 // These need write access to /dev/uinput and read access to /dev/input/event*,
@@ -92,6 +91,7 @@ func TestGamepadButtonsReachTheGame(t *testing.T) {
 	requireGamepads(t)
 	reset(t)
 
+	game := reset(t)
 	pads, id := connect(t, DefaultGamepadProfile())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -101,7 +101,7 @@ func TestGamepadButtonsReachTheGame(t *testing.T) {
 		t.Fatalf("pressing A: %v", err)
 	}
 
-	var raw, standard, justPressed bool
+	var raw, standard bool
 	if err := testRT.WaitTicks(ctx, 2); err != nil {
 		t.Fatalf("waiting: %v", err)
 	}
@@ -127,21 +127,21 @@ func TestGamepadButtonsReachTheGame(t *testing.T) {
 	}
 
 	// Press again to catch the edge, which is what a menu listens for.
+	//
+	// Latched from inside the game rather than polled from here: the edge is
+	// true for one tick, and a poll that reads only the ticks it lands on misses
+	// it whenever it falls in a gap. That failed about one run in ten and blamed
+	// the gamepad for it.
+	game.watchGamepad(id)
+
 	if err := pads.Button(id, uinput.BtnA, true); err != nil {
 		t.Fatalf("pressing A again: %v", err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && !justPressed {
-		testRT.Do(ctx, func() {
-			justPressed = inpututil.IsGamepadButtonJustPressed(id, 0)
-		})
-		if justPressed {
-			break
-		}
-		testRT.WaitTicks(ctx, 1)
+	if err := testRT.WaitTicks(ctx, 30); err != nil {
+		t.Fatalf("waiting for the press: %v", err)
 	}
 
-	if !justPressed {
+	if !game.sawPress() {
 		t.Error("inpututil never reported the press as new, so menus would not react")
 	}
 }

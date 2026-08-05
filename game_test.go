@@ -2,14 +2,17 @@ package ebitenmcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
 )
 
 // Like every test that touches Ebitengine, these need a display and the single
@@ -44,6 +47,17 @@ type probeGame struct {
 	updates  int
 	blockFor time.Duration
 	panicIn  string
+	still    bool
+
+	// watchPad latches a gamepad button's just-pressed edge from inside Update.
+	//
+	// It has to be seen from in here. IsGamepadButtonJustPressed is true for
+	// exactly one tick, and a test polling it from outside with Do reads only
+	// the ticks its calls happen to land on — so it misses the edge whenever it
+	// falls in a gap, which is a test that fails once in a while for no reason
+	// anybody can act on. A game's Update runs every tick and cannot miss it.
+	watchPad       *ebiten.GamepadID
+	sawJustPressed bool
 
 	marker *ebiten.Image
 }
@@ -63,6 +77,12 @@ func (g *probeGame) Update() error {
 	if panicIn == "update" {
 		panic("probeGame: deliberate panic in Update")
 	}
+
+	g.mu.Lock()
+	if g.watchPad != nil && inpututil.IsGamepadButtonJustPressed(*g.watchPad, 0) {
+		g.sawJustPressed = true
+	}
+	g.mu.Unlock()
 	if block > 0 {
 		time.Sleep(block)
 	}
@@ -71,8 +91,15 @@ func (g *probeGame) Update() error {
 
 func (g *probeGame) Draw(screen *ebiten.Image) {
 	g.mu.Lock()
-	fill, panicIn := g.fill, g.panicIn
+	fill, panicIn, still := g.fill, g.panicIn, g.still
 	g.mu.Unlock()
+
+	// A game that draws nothing is the shape Ebitengine stops compositing, and
+	// the only way to reach that path from a test. Everything else here fills
+	// the screen every frame, which is exactly why this went unnoticed.
+	if still {
+		return
+	}
 
 	screen.Fill(fill)
 
@@ -81,9 +108,30 @@ func (g *probeGame) Draw(screen *ebiten.Image) {
 	}
 }
 
-func (g *probeGame) Layout(int, int) (int, int) { return 64, 48 }
+func (g *probeGame) Layout(int, int) (int, int) {
+	g.mu.Lock()
+	panicIn := g.panicIn
+	g.mu.Unlock()
 
-func (g *probeGame) LayoutF(float64, float64) (float64, float64) { return 64, 48 }
+	if panicIn == "layout" {
+		panic("probeGame: deliberate panic in Layout")
+	}
+	return 64, 48
+}
+
+// LayoutF is the one Ebitengine actually calls here, since this game implements
+// LayoutFer. Layout panics too, so a wrapper built for a game without LayoutFer
+// would be covered as well.
+func (g *probeGame) LayoutF(float64, float64) (float64, float64) {
+	g.mu.Lock()
+	panicIn := g.panicIn
+	g.mu.Unlock()
+
+	if panicIn == "layout" {
+		panic("probeGame: deliberate panic in LayoutF")
+	}
+	return 64, 48
+}
 
 // DrawFinalScreen composites the offscreen and then stamps the marker, which is
 // the only place in this game that colour is ever drawn.
@@ -95,6 +143,21 @@ func (g *probeGame) DrawFinalScreen(screen ebiten.FinalScreen, offscreen *ebiten
 		g.marker.Fill(markerColor)
 	}
 	screen.DrawImage(g.marker, nil)
+}
+
+// watchGamepad starts latching the just-pressed edge of button 0.
+func (g *probeGame) watchGamepad(id ebiten.GamepadID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.watchPad, g.sawJustPressed = &id, false
+}
+
+func (g *probeGame) sawPress() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.sawJustPressed
 }
 
 func (g *probeGame) block(d time.Duration) {
@@ -279,6 +342,59 @@ func TestCaptureSeesTheFinalPass(t *testing.T) {
 	}
 }
 
+// TestCaptureSurvivesASkippedFinalPass is the regression for the worst way this
+// could go wrong.
+//
+// Ebitengine stops calling DrawFinalScreen after four frames in which nothing
+// drew into the offscreen, which a game that holds its picture still reaches as
+// soon as it stops clearing the screen every frame. Captures for a game with a
+// final pass are served from DrawFinalScreen, so before this was handled they
+// were never served at all: the caller waited out its whole timeout and was then
+// told the game loop had stopped — while it was running perfectly and reporting
+// so through every other tool. Being told the opposite of what is happening is
+// worse than being told nothing.
+func TestCaptureSurvivesASkippedFinalPass(t *testing.T) {
+	reset(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Process-global, so it goes back on the way out. Every other game here
+	// fills the screen each frame, so no other test can see it.
+	ebiten.SetScreenClearedEveryFrame(false)
+	defer func() {
+		ebiten.SetScreenClearedEveryFrame(true)
+		reset(t)
+	}()
+
+	still := newProbeGame(color.RGBA{R: 0x10, G: 0x10, B: 0x10, A: 0xff})
+	still.still = true
+
+	if err := testRT.SetGame(ctx, still); err != nil {
+		t.Fatalf("installing the still game: %v", err)
+	}
+
+	// Well past Ebitengine's skip threshold of four.
+	if err := testRT.WaitTicks(ctx, 20); err != nil {
+		t.Fatalf("waiting for the game to settle: %v", err)
+	}
+
+	frame, err := testRT.CaptureStage(ctx, StageFinal)
+	if err != nil {
+		t.Fatalf("capturing a game that is holding still: %v\n"+
+			"the final pass was skipped and nobody served the request", err)
+	}
+	if frame.Image.Bounds().Empty() {
+		t.Errorf("captured an empty frame: %v", frame.Image.Bounds())
+	}
+
+	// And again, to be sure it was not one lucky frame on the way into the
+	// skipping state.
+	if _, err := testRT.CaptureStage(ctx, StageFinal); err != nil {
+		t.Fatalf("the second capture of a still game failed: %v", err)
+	}
+}
+
 // TestFinalCopyIsReleasedWhenIdle covers the other half of the deal. The copy is
 // the size of the window — 33 MB at 4K — and a game that was looked at once must
 // not go on holding it for the rest of its life.
@@ -399,6 +515,74 @@ func TestSurvivesAPanicInDraw(t *testing.T) {
 	// useful thing in the report.
 	if testRT.LastFrame() == nil {
 		t.Error("no frame was kept from the moment of the crash")
+	}
+
+	reset(t)
+}
+
+// TestDoReturnsAPanicInsteadOfDyingOfIt covers the hole in "the game panicked
+// and the server is still answering".
+//
+// Everything a tool reads or writes runs through Do, inside the loop, and a
+// panic in there used to unwind through the loop and take the process with it.
+// game_inspect can cause one just by reading — reflection over a value taken
+// from an unexported field panics on Interface() — so a tool marked read-only
+// could kill the game it was inspecting, and the agent would be left with a
+// closed socket and no idea why.
+func TestDoReturnsAPanicInsteadOfDyingOfIt(t *testing.T) {
+	reset(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := testRT.Do(ctx, func() { panic("a tool asked for something impossible") })
+
+	var raised *CommandPanic
+	if !errors.As(err, &raised) {
+		t.Fatalf("Do returned %v, want a CommandPanic — if the process got this far the panic was swallowed somewhere else", err)
+	}
+	if !strings.Contains(raised.Value, "impossible") {
+		t.Errorf("the panic came back as %q, without what was panicked", raised.Value)
+	}
+	if !strings.Contains(raised.Stack, "TestDoReturnsAPanic") {
+		t.Errorf("the stack does not reach the code that panicked:\n%s", raised.Stack)
+	}
+
+	// And the loop is untouched: this is not a crash of the game.
+	if crash := testRT.Crash(); crash != nil {
+		t.Errorf("a panic in a queued command was recorded as a crash of the game: %+v", crash)
+	}
+	if err := testRT.WaitTicks(ctx, 3); err != nil {
+		t.Errorf("the loop stopped after a command panicked: %v", err)
+	}
+}
+
+// TestLayoutPanicIsSurvivable covers the one phase that had no net. Ebitengine
+// calls Layout every frame, so a game that panics there panicked sixty times a
+// second and took the process with it the first time.
+func TestLayoutPanicIsSurvivable(t *testing.T) {
+	reset(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bad := newProbeGame(color.RGBA{B: 0x40, A: 0xff})
+	bad.panicIn = "layout"
+
+	if err := testRT.SetGame(ctx, bad); err != nil {
+		t.Fatalf("installing the game: %v", err)
+	}
+
+	crash := waitForCrash(t)
+	if crash.Phase != "layout" {
+		t.Errorf("crash phase is %q, want %q", crash.Phase, "layout")
+	}
+
+	// The fallback has to be positive or Ebitengine panics on it in turn, which
+	// would defeat the whole point of catching this.
+	width, height := testWrapper.layoutFallback(0, 0)
+	if width <= 0 || height <= 0 {
+		t.Errorf("the fallback layout is %dx%d, which Ebitengine would panic on", width, height)
 	}
 
 	reset(t)

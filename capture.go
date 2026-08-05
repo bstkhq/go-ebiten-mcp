@@ -123,7 +123,12 @@ type captureRequest struct {
 type capturePlan struct {
 	offscreen []chan *Frame
 	final     []chan *Frame
-	ring      Stage // "" when the ring does not want this frame
+
+	// stage is "" when the buffer does not want this frame; buffer is the one
+	// that did, carried here so that finishCapture does not have to go and ask
+	// for it again on every frame it keeps.
+	ring   Stage
+	buffer *frameRing
 }
 
 func (p capturePlan) wantsFinal() bool {
@@ -134,8 +139,29 @@ func (p capturePlan) wantsOffscreen() bool {
 	return len(p.offscreen) > 0 || p.ring == StageOffscreen
 }
 
-func (p capturePlan) idle() bool {
-	return !p.wantsFinal() && !p.wantsOffscreen()
+// demoteToOffscreen settles for the offscreen for everyone, because the final
+// screen is not going to be drawn this frame and somebody is waiting. The
+// frames go out labelled offscreen, so what arrives is at least true.
+func (p *capturePlan) demoteToOffscreen() {
+	p.offscreen = append(p.offscreen, p.final...)
+	p.final = nil
+
+	if p.ring == StageFinal {
+		p.ring = StageOffscreen
+	}
+}
+
+// captureWanted reports whether anything would be done with a frame drawn right
+// now. Deliberately cheap and free of side effects: it runs inside Draw on
+// every frame, and unlike beginCapture it must not consume anything, because
+// the frame it is asked about has not been drawn yet.
+func (r *Runtime) captureWanted() bool {
+	r.mu.Lock()
+	waiting := len(r.captures)
+	ring := r.ring
+	r.mu.Unlock()
+
+	return waiting > 0 || (ring != nil && ring.Enabled())
 }
 
 // beginCapture decides what this frame owes, and takes the waiters off the
@@ -170,7 +196,7 @@ func (r *Runtime) beginCapture() capturePlan {
 	}
 
 	if ring != nil && !frozen && ring.wants() {
-		plan.ring = ring.Stage()
+		plan.ring, plan.buffer = ring.Stage(), ring
 		if plan.ring == StageFinal && !hasFinal {
 			plan.ring = StageOffscreen
 		}
@@ -215,22 +241,25 @@ func (r *Runtime) finishCapture(plan capturePlan, offscreen, final *ebiten.Image
 	}
 	r.mu.Unlock()
 
-	if plan.ring == "" {
+	if plan.buffer == nil {
 		return
 	}
-	if ring := r.Ring(); ring != nil {
-		frame := offFrame
-		if plan.ring == StageFinal {
-			frame = finalFrame
-		}
-		if frame != nil {
-			ring.offer(frame.Image, frame.Tick)
-		}
+
+	frame := offFrame
+	if plan.ring == StageFinal {
+		frame = finalFrame
+	}
+	if frame != nil {
+		plan.buffer.offer(frame.Image, frame.Tick)
 	}
 }
 
-// Ring is the retrospective frame buffer, which is off until something asks for
-// it.
+// Ring is the retrospective frame buffer, building it on the first ask.
+//
+// It is a constructor as much as a getter, which matters because game_state
+// reports the buffer's status: merely asking what the game is doing brings the
+// buffer into being. Empty and disabled, so it costs an allocation and nothing
+// else, but it is why nothing downstream needs to handle a nil one.
 func (r *Runtime) Ring() *frameRing {
 	r.mu.Lock()
 	defer r.mu.Unlock()

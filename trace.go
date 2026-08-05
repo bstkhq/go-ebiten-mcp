@@ -33,7 +33,24 @@ type traceRing struct {
 	lines [traceHistory]TraceLine
 	n     int
 
-	restore []func()
+	taps []*fdTap
+}
+
+// fdTap is one redirected descriptor and everything needed to put it back.
+//
+// Putting it back is not optional. While the tap is in place, everything written
+// to the descriptor goes through a pipe and a goroutine before reaching the
+// terminal, and a process that calls os.Exit does not wait for that goroutine —
+// so the tail of its output is simply lost. For a test binary that is the worst
+// possible thing to lose, because the tail is the part that says which test
+// failed and why.
+type fdTap struct {
+	fd       int
+	original int
+	read     *os.File
+	write    *os.File
+	restored *os.File // the original descriptor, wrapped so it can be closed portably
+	drained  chan struct{}
 }
 
 func newTraceRing() *traceRing {
@@ -97,13 +114,50 @@ func (t *traceRing) tap(fd int, name string, tick func() int64) {
 
 	passthrough := os.NewFile(uintptr(original), "original-"+name)
 
+	tap := &fdTap{fd: fd, original: original, read: r, write: w,
+		restored: passthrough, drained: make(chan struct{})}
+
 	// Go's own os.Stdout still holds descriptor 1, which now points at the
 	// pipe, so Go writes are captured along with everything else.
-	go t.pump(r, passthrough, name, tick)
+	go func() {
+		defer close(tap.drained)
+		t.pump(r, passthrough, name, tick)
+	}()
 
 	t.mu.Lock()
-	t.restore = append(t.restore, func() { dupTo(original, fd) })
+	t.taps = append(t.taps, tap)
 	t.mu.Unlock()
+}
+
+// stop puts the descriptors back and waits for everything already written to
+// reach the terminal.
+//
+// The order is the whole point. Restoring the descriptor first means anything
+// written from here on goes straight out; closing the pipe's write end then
+// gives the pump its EOF, which is the only way it can ever return, since while
+// the tap is up the write end *is* descriptor 1. Waiting for it is what stops a
+// process that exits immediately afterwards from losing its last lines.
+func (t *traceRing) stop() {
+	t.mu.Lock()
+	taps := t.taps
+	t.taps = nil
+	t.mu.Unlock()
+
+	for _, tap := range taps {
+		dupTo(tap.original, tap.fd)
+		tap.write.Close()
+
+		select {
+		case <-tap.drained:
+		case <-time.After(time.Second):
+			// Something is still holding the write end open. Waiting forever
+			// here would hang the shutdown of a process that is only trying to
+			// tidy up, which is a worse outcome than a truncated last line.
+		}
+
+		tap.read.Close()
+		tap.restored.Close()
+	}
 }
 
 func (t *traceRing) pump(r io.Reader, passthrough io.Writer, name string, tick func() int64) {

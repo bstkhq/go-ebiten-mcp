@@ -37,6 +37,18 @@ type wrapper struct {
 	// being used and released again once it is not.
 	final     *ebiten.Image
 	finalIdle int
+
+	// nudge and skipped keep the final pass reachable; see keepFinalPassAlive.
+	// servedInDraw says this frame's capture was already begun and served from
+	// the offscreen, so the final pass must not begin a second one.
+	nudge        *ebiten.Image
+	skipped      int
+	servedInDraw bool
+
+	// lastWidth and lastHeight are the last size the game asked for, kept so
+	// that a panic in Layout can still be answered with something sane.
+	lastWidth  int
+	lastHeight int
 }
 
 func (w *wrapper) Update() error {
@@ -106,7 +118,77 @@ func (w *wrapper) Draw(screen *ebiten.Image) {
 	// DrawFinalScreen, which has both images in hand.
 	if !w.hasFinal {
 		w.rt.finishCapture(w.rt.beginCapture(), screen, nil)
+		return
 	}
+
+	w.keepFinalPassAlive(screen)
+}
+
+// finalPassGrace is how many frames may go by with somebody waiting and no
+// final pass before they are served from the offscreen instead. Three is past
+// Ebitengine's own skip threshold of four minus the frame that resets it, so it
+// only fires for a skip this cannot undo.
+const finalPassGrace = 3
+
+// keepFinalPassAlive makes sure DrawFinalScreen still happens while somebody is
+// waiting for what it produces.
+//
+// Ebitengine gives up compositing after four frames in which nothing drew into
+// the offscreen (internal/ui/context.go: skipCount against maxSkipCount), and
+// returns before DrawFinalScreen. A game that calls
+// ebiten.SetScreenClearedEveryFrame(false) — the documented way to save a GPU
+// on a picture that is not changing — reaches that as soon as it holds still.
+// Since a game with a final pass has its captures served from there, the frame
+// would never arrive: the caller would wait out its whole timeout and then be
+// told the game loop had stopped, while the loop was running perfectly. A
+// debugging tool reporting the opposite of what is happening is worse than one
+// that is simply missing.
+//
+// A fully transparent pixel is enough to mark the offscreen as modified. Under
+// source-over an alpha of zero leaves every channel exactly as it was — dst +
+// 0×(…) — so the frame is identical to the one that would have been drawn, and
+// the skip does not happen. It costs one draw call, and only while somebody is
+// actually waiting.
+func (w *wrapper) keepFinalPassAlive(screen *ebiten.Image) {
+	if !w.rt.captureWanted() {
+		// Nobody waiting, so a skipped frame costs nothing — there is no
+		// capture to miss and the screen is not changing. Let go of the copy on
+		// the way past, since drawFinalScreen may not be running to do it.
+		//
+		// When it is running, both call releaseFinal and the idle count reaches
+		// its limit in half the frames. That is fine: it is a "nobody has wanted
+		// this for a while" heuristic, not a promise about a number.
+		w.skipped = 0
+		w.releaseFinal()
+		return
+	}
+
+	if w.nudge == nil {
+		// Never filled: a new image is transparent, which is the whole point.
+		w.nudge = ebiten.NewImage(1, 1)
+	}
+	screen.DrawImage(w.nudge, nil)
+
+	w.skipped++
+	if w.skipped < finalPassGrace {
+		return
+	}
+	w.skipped = 0
+
+	// The nudge did not bring it back, so this is one of the skips it cannot
+	// reach: a screen of zero size, or a failure inside Ebitengine's own draw.
+	// Serve the offscreen rather than leave anybody waiting. It is not what was
+	// asked for, and the frame says so — Stage comes back as offscreen — which
+	// is a smaller lie than a timeout blaming the game loop.
+	plan := w.rt.beginCapture()
+	plan.demoteToOffscreen()
+	w.rt.finishCapture(plan, screen, nil)
+
+	// If the final pass does turn up after all — the skip was transient and the
+	// nudge finally took — it must not begin a second capture for this frame.
+	// beginCapture advances the buffer's sampling counter, and doing that twice
+	// for one drawn frame is the one thing its contract rules out.
+	w.servedInDraw = true
 }
 
 func (w *wrapper) drawGame(screen *ebiten.Image) {
@@ -159,8 +241,24 @@ func (w *wrapper) drawCrash(screen *ebiten.Image, crash *Crash) {
 		crash.Phase, crash.Tick, crash.Value), 8, 6)
 }
 
-func (w *wrapper) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return w.rt.currentGame().Layout(outsideWidth, outsideHeight)
+// Layout forwards to the game, catching a panic the same way Update and Draw
+// do.
+//
+// It was the one phase without a net, and Ebitengine calls it every frame — so
+// "the game panicked and the server is still answering" was a promise that did
+// not cover a resize, or a field read before it was set up.
+func (w *wrapper) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
+	defer func() {
+		if v := recover(); v != nil {
+			w.rt.recordCrash("layout", v)
+			screenWidth, screenHeight = w.layoutFallback(outsideWidth, outsideHeight)
+		}
+	}()
+
+	screenWidth, screenHeight = w.rt.currentGame().Layout(outsideWidth, outsideHeight)
+	w.rememberLayout(screenWidth, screenHeight)
+
+	return screenWidth, screenHeight
 }
 
 // Ebitengine picks up two optional interfaces by type assertion, and Go cannot
@@ -171,15 +269,52 @@ func (w *wrapper) Layout(outsideWidth, outsideHeight int) (int, int) {
 // SetGame can swap in a game that implements a different set, and a wrapper
 // that assumed otherwise would call a method that is not there.
 
+// rememberLayout keeps the last size the game asked for, which is what makes a
+// sensible answer possible after its Layout has panicked.
+func (w *wrapper) rememberLayout(width, height int) {
+	if width > 0 && height > 0 {
+		w.lastWidth, w.lastHeight = width, height
+	}
+}
+
+// layoutFallback answers for a game whose Layout just panicked.
+//
+// It has to be positive: Ebitengine panics on a layout of zero or less, and
+// doing that here would undo the recover that has just caught the game's own.
+// The size the game last asked for is the truest thing available.
+func (w *wrapper) layoutFallback(outsideWidth, outsideHeight int) (int, int) {
+	switch {
+	case w.lastWidth > 0 && w.lastHeight > 0:
+		return w.lastWidth, w.lastHeight
+	case outsideWidth > 0 && outsideHeight > 0:
+		return outsideWidth, outsideHeight
+	default:
+		return 1, 1
+	}
+}
+
 type wrapperLayoutF struct{ *wrapper }
 
-func (w *wrapperLayoutF) LayoutF(outsideWidth, outsideHeight float64) (float64, float64) {
+func (w *wrapperLayoutF) LayoutF(outsideWidth, outsideHeight float64) (screenWidth, screenHeight float64) {
+	defer func() {
+		if v := recover(); v != nil {
+			w.rt.recordCrash("layout", v)
+
+			width, height := w.layoutFallback(int(outsideWidth), int(outsideHeight))
+			screenWidth, screenHeight = float64(width), float64(height)
+		}
+	}()
+
 	if g, ok := w.rt.currentGame().(ebiten.LayoutFer); ok {
-		return g.LayoutF(outsideWidth, outsideHeight)
+		screenWidth, screenHeight = g.LayoutF(outsideWidth, outsideHeight)
+	} else {
+		width, height := w.rt.currentGame().Layout(int(outsideWidth), int(outsideHeight))
+		screenWidth, screenHeight = float64(width), float64(height)
 	}
 
-	sw, sh := w.rt.currentGame().Layout(int(outsideWidth), int(outsideHeight))
-	return float64(sw), float64(sh)
+	w.rememberLayout(int(screenWidth), int(screenHeight))
+
+	return screenWidth, screenHeight
 }
 
 type wrapperFinalScreen struct{ *wrapper }
@@ -207,6 +342,20 @@ func (w *wrapperLayoutFFinalScreen) DrawFinalScreen(screen ebiten.FinalScreen, o
 // not pay for a debugging tool that is not being used.
 func (w *wrapper) drawFinalScreen(screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
 	start := time.Now()
+
+	// It arrived, so nothing is stranded; see keepFinalPassAlive.
+	w.skipped = 0
+
+	if w.servedInDraw {
+		w.servedInDraw = false
+
+		// Draw already served this frame from the offscreen. Run the pass so the
+		// player still sees it, and take no capture.
+		w.finalPass(screen, offscreen, geoM)
+		w.rt.addDraw(time.Since(start))
+		return
+	}
+
 	plan := w.rt.beginCapture()
 
 	if !plan.wantsFinal() {
@@ -310,8 +459,4 @@ func wrap(rt *Runtime) ebiten.Game {
 	default:
 		return base
 	}
-}
-
-func sprint(v any) string {
-	return fmt.Sprint(v)
 }

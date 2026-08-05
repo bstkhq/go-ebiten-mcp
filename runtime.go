@@ -9,6 +9,7 @@ package ebitenmcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -96,32 +97,40 @@ func (r *Runtime) Server() *Server {
 	return r.server
 }
 
-// Close stops the MCP server and unplugs any virtual controllers. The game is
-// untouched.
+// Close stops the MCP server, puts stdout and stderr back, drops the frame
+// buffer and unplugs any virtual controllers. The game is untouched.
 //
-// The controllers matter here: a uinput device outlives the process that made
-// it, so leaving without destroying them leaves phantom gamepads on the machine.
+// Two of those outlive the process if they are skipped, which is why this is
+// not optional and why RunGame and RunTests both call it:
+//
+//   - A uinput device belongs to the kernel, not to the process that asked for
+//     it, so leaving without destroying one leaves a phantom gamepad on the
+//     machine.
+//   - Trace capture redirects descriptors 1 and 2 through a pipe. Until they are
+//     put back, everything written to them reaches the terminal only by way of a
+//     goroutine — and os.Exit does not wait for goroutines, so whatever was
+//     written last is lost. For a test binary that is the failure message.
+//
+// Safe to call twice; the second one has nothing to do.
 func (r *Runtime) Close() error {
 	r.mu.Lock()
-	gamepads := r.gamepads
+	gamepads, ring, server := r.gamepads, r.ring, r.server
+	r.gamepads, r.ring, r.server = nil, nil, nil
 	r.mu.Unlock()
 
 	if gamepads != nil {
 		gamepads.Close()
 	}
-
-	r.mu.Lock()
-	ring := r.ring
-	r.mu.Unlock()
-
 	if ring != nil {
 		ring.Disable()
 	}
 
-	if s := r.Server(); s != nil {
-		return s.Close()
+	var err error
+	if server != nil {
+		err = server.Close()
+		server.traces.stop()
 	}
-	return nil
+	return err
 }
 
 func newRuntime(game ebiten.Game) *Runtime {
@@ -144,28 +153,80 @@ func newRuntime(game ebiten.Game) *Runtime {
 // it is debugging is worse than useless.
 func (r *Runtime) Do(ctx context.Context, fn func()) error {
 	done := make(chan struct{})
+	var raised *CommandPanic
+
+	// The recover is registered second, so it runs first: whatever it captures
+	// is written before done is closed, and the channel carries it across.
+	command := func() {
+		defer close(done)
+		defer func() {
+			if v := recover(); v != nil {
+				raised = &CommandPanic{Value: fmt.Sprint(v), Stack: string(debug.Stack())}
+			}
+		}()
+
+		fn()
+	}
 
 	select {
-	case r.commands <- func() { defer close(done); fn() }:
+	case r.commands <- command:
 	case <-ctx.Done():
 		return ErrLoopStalled
 	}
 
 	select {
 	case <-done:
+		if raised != nil {
+			return raised
+		}
 		return nil
 	case <-ctx.Done():
 		return ErrLoopStalled
 	}
 }
 
+// CommandPanic is what a caller gets when the work it asked to run inside the
+// game loop panicked.
+//
+// It exists so that the panic is the caller's problem rather than everybody's.
+// Without it the panic unwinds through the loop and kills the process — which
+// game_inspect can do just by reading, since reflection over a value taken from
+// an unexported field panics on Interface(). A tool marked read-only bringing
+// down the game it is inspecting is the worst outcome available here; being told
+// what went wrong, by a game that is still running, is much the best.
+type CommandPanic struct {
+	Value string
+	Stack string
+}
+
+func (e *CommandPanic) Error() string {
+	return "ebitenmcp: what you asked to run inside the game loop panicked: " + e.Value
+}
+
 // WaitTicks blocks until the game has advanced n ticks. A paused game advances
 // none, so this is also how a caller notices it is paused.
+//
+// It counts against a target tick rather than counting wake-ups, and that is not
+// a detail. Waiting for the channel n times loses any tick that lands between
+// one wake-up and the next read of the channel, which with vsync off is most of
+// them — so waiting for four hundred ticks would sit there long after four
+// hundred had gone by, and report a stalled loop that had done exactly what it
+// was asked. Reading the tick and the channel under the same lock closes that:
+// a tick that arrives in between has either already been counted or will close
+// the channel now held.
 func (r *Runtime) WaitTicks(ctx context.Context, n int) error {
-	for i := 0; i < n; i++ {
+	r.mu.Lock()
+	target := r.tick + int64(n)
+	r.mu.Unlock()
+
+	for {
 		r.mu.Lock()
-		ch := r.tickCh
+		tick, ch := r.tick, r.tickCh
 		r.mu.Unlock()
+
+		if tick >= target {
+			return nil
+		}
 
 		select {
 		case <-ch:
@@ -173,7 +234,6 @@ func (r *Runtime) WaitTicks(ctx context.Context, n int) error {
 			return ErrLoopStalled
 		}
 	}
-	return nil
 }
 
 // Tick is the number of ticks the wrapped game has actually run. It is not
@@ -425,7 +485,7 @@ func (r *Runtime) recordCrash(phase string, v any) {
 	}
 
 	r.crash = &Crash{
-		Value: sprint(v),
+		Value: fmt.Sprint(v),
 		Stack: string(debug.Stack()),
 		Tick:  r.tick,
 		When:  time.Now(),
