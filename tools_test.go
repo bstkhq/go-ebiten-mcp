@@ -934,3 +934,66 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestTypedRunesSurviveALoopThatIsMidFrame pins the ordering that a rune needs
+// and that nothing else does.
+//
+// Runes are an event: the injector hands them to the game for exactly one tick
+// and drops them. Apply runs at a fixed point of the frame, so a rune written
+// from any other goroutine after that point is held back to the next tick —
+// while the caller waits the one tick the event is supposed to need, reads, and
+// finds nothing, having done everything right.
+//
+// The window is about a frame wide, so in the wild this is a test that fails
+// once in a while for no reason anybody can act on: it turned up once, in the
+// example's suite, under load, and did not come back in twelve more runs. Rather
+// than chase it, this puts the loop where it has to be: a game that blocks
+// inside Update is a loop that is past Apply and cannot take another rune this
+// tick. Writing from in there is the only thing that still arrives.
+func TestTypedRunesSurviveALoopThatIsMidFrame(t *testing.T) {
+	game := reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := testRT.InputError(); err != nil {
+		t.Skipf("input injection is unavailable here: %v", err)
+	}
+
+	// Long enough that the write below lands well inside it, short enough that
+	// the suite does not notice.
+	game.mu.Lock()
+	game.blockFor = 400 * time.Millisecond
+	game.mu.Unlock()
+
+	// Update zeroes blockFor as it reads it, so a zero means the frame that is
+	// going to block has begun — and with it, that this tick's Apply is behind
+	// us. That is the whole point of the arrangement.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		game.mu.Lock()
+		started := game.blockFor == 0
+		game.mu.Unlock()
+
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the loop never picked up the block")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if _, _, err := s.typeText(ctx, nil, typeInput{Text: "hola"}); err != nil {
+		t.Fatalf("game_type: %v", err)
+	}
+
+	game.mu.Lock()
+	got := string(game.typed)
+	game.mu.Unlock()
+
+	if got != "hola" {
+		t.Errorf("the game was typed at mid-frame and saw %q, want %q", got, "hola")
+	}
+}

@@ -60,6 +60,11 @@ type probeGame struct {
 	watchPad       *ebiten.GamepadID
 	sawJustPressed bool
 
+	// typed latches what AppendInputChars handed over, for the same reason
+	// watchPad exists: runes live for exactly one tick, so a test reading them
+	// from outside sees only the ticks its own calls land on.
+	typed []rune
+
 	marker *ebiten.Image
 }
 
@@ -83,6 +88,7 @@ func (g *probeGame) Update() error {
 	if g.watchPad != nil && inpututil.IsGamepadButtonJustPressed(*g.watchPad, 0) {
 		g.sawJustPressed = true
 	}
+	g.typed = append(g.typed, ebiten.AppendInputChars(nil)...)
 	g.mu.Unlock()
 	if block > 0 {
 		time.Sleep(block)

@@ -217,10 +217,15 @@ func (s *Server) typeText(ctx context.Context, _ *mcpsdk.CallToolRequest, in typ
 		return nil, InputOutput{}, fmt.Errorf("no text given")
 	}
 
-	s.rt.Injector().Type([]rune(in.Text))
+	// Written from inside the loop. Typed characters live for exactly one tick,
+	// like real ones — which is also why writing them from this goroutine was a
+	// race with the tick below. See Runtime.injectEvent.
+	if err := s.rt.injectEvent(ctx, func(inj *hook.Injector) { inj.Type([]rune(in.Text)) }); err != nil {
+		return nil, InputOutput{}, err
+	}
 
-	// Typed characters live for exactly one tick, like real ones, so the game
-	// has to be allowed to run at least that tick before anything is reported.
+	// And the game has to be allowed to run that tick before anything is
+	// reported.
 	if in.ThenWaitTicks == 0 {
 		in.ThenWaitTicks = 1
 	}
@@ -297,8 +302,13 @@ func (s *Server) applyMouse(ctx context.Context, in mouseAction) (InputOutput, e
 		out.MovedTo = []float64{*in.X, *in.Y}
 	}
 
+	// The wheel is an event, not a state: it reaches the game for one tick and
+	// is gone, so it goes in through the loop like a rune does. The cursor and
+	// the buttons above are states and stay where they are put.
 	if in.ScrollX != 0 || in.ScrollY != 0 {
-		inj.Scroll(in.ScrollX, in.ScrollY)
+		if err := s.rt.injectEvent(ctx, func(inj *hook.Injector) { inj.Scroll(in.ScrollX, in.ScrollY) }); err != nil {
+			return InputOutput{}, err
+		}
 		out.Scrolled = []float64{in.ScrollX, in.ScrollY}
 	}
 

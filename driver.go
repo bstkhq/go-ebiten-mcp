@@ -164,10 +164,19 @@ func T(t *testing.T) *Driver {
 func (d *Driver) injector() *hook.Injector {
 	d.t.Helper()
 
+	d.requireInjection()
+	return d.rt.Injector()
+}
+
+// requireInjection is the check on its own, for the two methods that do their
+// writing inside the loop: skipping a test is the test goroutine's business and
+// must not happen on the game's.
+func (d *Driver) requireInjection() {
+	d.t.Helper()
+
 	if !hook.Supported {
 		d.t.Skip("ebitenmcp: this build injects no input (-tags ebitenmcp_nohook)")
 	}
-	return d.rt.Injector()
 }
 
 func (d *Driver) ctx() (context.Context, context.CancelFunc) {
@@ -245,7 +254,16 @@ func (d *Driver) KeyUp(keys ...ebiten.Key) {
 func (d *Driver) Type(text string) {
 	d.t.Helper()
 
-	d.injector().Type([]rune(text))
+	d.requireInjection()
+
+	ctx, cancel := d.ctx()
+	defer cancel()
+
+	// From inside the loop: runes are an event, and writing one from here is a
+	// race with the very frame this then waits for. See Runtime.injectEvent.
+	if err := d.rt.injectEvent(ctx, func(inj *hook.Injector) { inj.Type([]rune(text)) }); err != nil {
+		d.fatal(err)
+	}
 	d.Tick(1)
 }
 
@@ -298,7 +316,15 @@ func (d *Driver) Drag(x0, y0, x1, y1 float64, steps int) {
 func (d *Driver) Scroll(x, y float64) {
 	d.t.Helper()
 
-	d.injector().Scroll(x, y)
+	d.requireInjection()
+
+	ctx, cancel := d.ctx()
+	defer cancel()
+
+	// The wheel is an event too, and lasts exactly as long as a rune does.
+	if err := d.rt.injectEvent(ctx, func(inj *hook.Injector) { inj.Scroll(x, y) }); err != nil {
+		d.fatal(err)
+	}
 	d.Tick(1)
 }
 

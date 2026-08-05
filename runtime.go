@@ -205,6 +205,25 @@ func (r *Runtime) Do(ctx context.Context, fn func()) error {
 	}
 }
 
+// injectEvent writes input from inside the game loop, at the point the commands
+// are drained — which is the step before the injector is applied.
+//
+// State-like input does not need this. A key held down or a cursor moved stays
+// where it was put until something moves it, so landing a tick late costs a
+// tick and nothing else. Events do: runes and the wheel are handed to the game
+// for exactly one tick and then dropped, which is what makes them behave like
+// the real thing.
+//
+// Written from any goroutine but the loop's, an event lands at whatever point
+// of the frame that goroutine happens to get. Apply runs at a fixed one, so a
+// write that arrives after it is held back to the next tick — while the caller
+// waits the one tick the event is supposed to need, reads, and finds nothing,
+// having done everything right. Draining the commands happens before Apply, so
+// writing from in there is always in time.
+func (r *Runtime) injectEvent(ctx context.Context, fn func(*hook.Injector)) error {
+	return r.Do(ctx, func() { fn(r.Injector()) })
+}
+
 // CommandPanic is what a caller gets when the work it asked to run inside the
 // game loop panicked.
 //
