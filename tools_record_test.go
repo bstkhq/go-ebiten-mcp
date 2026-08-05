@@ -117,6 +117,53 @@ func TestRecordToolWritesTheVideoWhenAskedFor(t *testing.T) {
 	}
 }
 
+// TestRecordToolCanReturnTheAnimationItself.
+//
+// Asked for rather than assumed, because it is a guess about the client:
+// where one animates a gif it beats a grid of stills at showing motion, and
+// where one does not it shows a single frame, and then the contact sheet was
+// the better answer all along. So the tool has to hand back the gif when it
+// can and say why it could not when it cannot — never quietly return the sheet
+// as though that had been the question.
+func TestRecordToolCanReturnTheAnimationItself(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	result, _, err := s.record(ctx, nil, recordInput{
+		Frames: 4, Format: "gif", Inline: "gif", Stage: "offscreen",
+	})
+	if err != nil {
+		t.Fatalf("game_record: %v", err)
+	}
+
+	image, note := splitContent(t, result)
+	if image.MIMEType != "image/gif" {
+		t.Errorf("it returned a %s inline, and a gif was asked for", image.MIMEType)
+	}
+	if len(image.Data) == 0 {
+		t.Error("the inline animation is empty")
+	}
+	if !strings.Contains(note, "video:") {
+		t.Errorf("the note does not say where the file went: %q", note)
+	}
+
+	// Asking for an mp4 inline as a gif cannot work, and the answer is the
+	// contact sheet plus the reason — not a failed call over the part of the
+	// request that was a preference.
+	result, _, err = s.record(ctx, nil, recordInput{
+		Frames: 4, Format: "mp4", Inline: "gif", Stage: "offscreen",
+	})
+	if err != nil {
+		t.Fatalf("game_record: %v", err)
+	}
+	if _, note = splitContent(t, result); !strings.Contains(note, "no gif") {
+		t.Errorf("it fell back to the sheet without saying why: %q", note)
+	}
+}
+
 // TestProfileToolAnswersWithSomethingReadable.
 //
 // A pprof file is addresses, not names, so the artifact on its own is no use to
