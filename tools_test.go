@@ -1027,3 +1027,52 @@ func TestTypedRunesSurviveALoopThatIsMidFrame(t *testing.T) {
 		t.Errorf("the game was typed at mid-frame and saw %q, want %q", got, "hola")
 	}
 }
+
+// TestInputStateSeesWhatWasInjected is the tool's whole job, and it did not do
+// it: an agent asking what the game thinks is pressed got "nothing" whenever
+// the answer was due to injection, which in this library is always.
+//
+// Ebitengine rebuilds the game-visible input state at the top of every tick
+// from what the window actually reported — on a machine nobody is touching,
+// nothing — and the injector writes over that once a tick, from the wrapper's
+// Update. Read through Do, which runs a step earlier, and the read lands in the
+// gap between the two. Every key held, every finger down and every cursor move
+// was invisible, and the game saw all of them a moment later.
+func TestInputStateSeesWhatWasInjected(t *testing.T) {
+	reset(t)
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := testRT.InputError(); err != nil {
+		t.Skipf("input injection is unavailable here: %v", err)
+	}
+
+	inj := testRT.Injector()
+	inj.ReleaseAll()
+
+	inj.KeyDown(ebiten.KeyA)
+	inj.MouseDown(ebiten.MouseButtonLeft)
+	inj.MoveCursor(12, 34)
+	t.Cleanup(func() { inj.ReleaseAll() })
+
+	if err := testRT.WaitTicks(ctx, 2); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+
+	_, out, err := s.inputState(ctx, nil, emptyInput{})
+	if err != nil {
+		t.Fatalf("game_input_state: %v", err)
+	}
+
+	if !contains(out.KeysPressed, "A") {
+		t.Errorf("a key held down reads as %v", out.KeysPressed)
+	}
+	if !contains(out.MouseButtons, "left") {
+		t.Errorf("a button held down reads as %v", out.MouseButtons)
+	}
+	if out.Cursor != (Point{X: 12, Y: 34}) {
+		t.Errorf("the cursor reads as %+v, want 12,34", out.Cursor)
+	}
+}

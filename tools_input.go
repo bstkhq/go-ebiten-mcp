@@ -487,9 +487,12 @@ func (s *Server) inputState(ctx context.Context, _ *mcpsdk.CallToolRequest, _ em
 
 	out := InputStateOutput{Injection: s.inputStatus()}
 
-	// Read from inside the loop: input state is only coherent for the tick it
-	// belongs to, and reading it from outside would mix two of them.
-	if err := s.rt.Do(ctx, func() {
+	// Read from inside the loop, and from after the injector has written this
+	// tick's input rather than before it: input state is only coherent for the
+	// tick it belongs to, and Ebitengine rebuilds it at the top of every tick
+	// from what the window reported. Read a moment earlier and the answer is
+	// "nothing pressed" however much was injected. See Runtime.doAfterInput.
+	if err := s.rt.doAfterInput(ctx, func() {
 		cx, cy := ebiten.CursorPosition()
 		wx, wy := ebiten.Wheel()
 

@@ -73,8 +73,13 @@ type Runtime struct {
 	terminating bool
 	crash       *Crash
 
-	// Work queued from other goroutines to run inside Update.
+	// Work queued from other goroutines to run inside Update. Two queues,
+	// because there are two moments in a tick worth running at and they are on
+	// opposite sides of the one thing that makes them different: commands are
+	// drained before the injector is applied, reads after it. See Do and
+	// doAfterInput.
 	commands chan func()
+	reads    chan func()
 
 	// Whether the wrapper was built for LayoutFer. Fixed before the loop starts
 	// and checked by SetGame, since Ebitengine asserts on the wrapper's concrete
@@ -149,6 +154,7 @@ func newRuntime(game ebiten.Game) *Runtime {
 		lastTick: time.Now(),
 		tickCh:   make(chan struct{}),
 		commands: make(chan func(), 64),
+		reads:    make(chan func(), 64),
 		captures: captures{stage: StageFinal},
 	}
 }
@@ -160,6 +166,29 @@ func newRuntime(game ebiten.Game) *Runtime {
 // never drains the queue, and a debugging tool that hangs along with the thing
 // it is debugging is worse than useless.
 func (r *Runtime) Do(ctx context.Context, fn func()) error {
+	return r.do(ctx, r.commands, fn)
+}
+
+// doAfterInput runs fn inside the loop too, but after the injector has written
+// this tick's synthetic input rather than before.
+//
+// Which side of that line a caller wants is not a detail. Ebitengine rebuilds
+// the game-visible input state at the top of every tick from what the window
+// actually reported, which on a machine nobody is touching is nothing at all;
+// the injector writes over that, once a tick, from the wrapper's Update. So
+// anything asking what is pressed has to ask after that write. Before it, the
+// honest answer is always "nothing", whatever was injected and whatever the
+// game is about to see — which is what game_input_state answered for its whole
+// life.
+//
+// Commands stay on the other side, and for the mirror-image reason: one may
+// have just asked for a key to be held, and it has to be held before the write
+// that makes the game see it.
+func (r *Runtime) doAfterInput(ctx context.Context, fn func()) error {
+	return r.do(ctx, r.reads, fn)
+}
+
+func (r *Runtime) do(ctx context.Context, queue chan func(), fn func()) error {
 	done := make(chan struct{})
 	var raised *CommandPanic
 
@@ -189,7 +218,7 @@ func (r *Runtime) Do(ctx context.Context, fn func()) error {
 	}
 
 	select {
-	case r.commands <- command:
+	case queue <- command:
 	case <-ctx.Done():
 		return ErrLoopStalled
 	}
@@ -457,10 +486,19 @@ func (r *Runtime) addDraw(d time.Duration) { r.timings.addDraw(d) }
 // drainCommands runs everything queued, but only what was already waiting when
 // it started. A command that queues another one therefore cannot starve the
 // game of its tick.
-func (r *Runtime) drainCommands() {
-	for n := len(r.commands); n > 0; n-- {
+func (r *Runtime) drainCommands() { drain(r.commands) }
+
+// drainReads runs what was queued to see this tick's input, and so runs after
+// the injector has written it.
+func (r *Runtime) drainReads() { drain(r.reads) }
+
+// drain runs what is queued now and no more. Taking the length first is what
+// stops a command that queues another from being run in the same tick, which
+// would let a loop of them hold the game still.
+func drain(queue chan func()) {
+	for n := len(queue); n > 0; n-- {
 		select {
-		case fn := <-r.commands:
+		case fn := <-queue:
 			fn()
 		default:
 			return

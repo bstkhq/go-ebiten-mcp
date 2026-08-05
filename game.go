@@ -75,6 +75,11 @@ func (w *wrapper) Update() error {
 		w.rt.injector.Apply()
 	}
 
+	// And now the work that had to wait for that write: anything asking what is
+	// pressed. Before this point the game-visible input state is whatever the
+	// window reported, which on a machine nobody is touching is nothing.
+	w.rt.drainReads()
+
 	if w.rt.terminated() {
 		return ebiten.Termination
 	}
