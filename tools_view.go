@@ -74,14 +74,15 @@ func (s *Server) addViewTools(srv *mcpsdk.Server) {
 // game_screenshot
 // ---------------------------------------------------------------------------
 
-// stageDoc describes the stage argument, once.
+// stageDoc is the text of the stage argument, for the error a bad one produces.
 //
-// It is a Go constant and not a jsonschema tag because a tag has to be a
-// literal, so four tools had this paragraph copied into them — with one of the
-// copies stating the opposite default, and a comment above them claiming it was
-// written once. The tags now say `jsonschema:"which drawing step to read: final for what the player sees, offscreen for what the game's own Draw produced before its DrawFinalScreen ran. Only differs for a game that draws its own final screen. Defaults to final"` and the text is attached
-// to the schema after the fact, in stageSchema, which is the only way to have
-// one copy of it.
+// A jsonschema tag has to be a string literal, so the four tools that take a
+// stage each carry their own copy of this paragraph in their tag and Go leaves
+// no way around it. What it does leave a way around is the copies drifting: one
+// of them once stated the opposite default, under a comment claiming the text
+// was written once. TestStageIsDescribedTheSameEverywhere compares them, so a
+// copy edited alone fails a test rather than reaching an agent as a
+// contradiction.
 const stageDoc = "which drawing step to read: 'final' for what the player sees, " +
 	"'offscreen' for what the game's own Draw produced before its DrawFinalScreen " +
 	"ran. Only differs for a game that draws its own final screen — where asking " +
