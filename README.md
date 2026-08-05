@@ -20,7 +20,8 @@ func main() {
 
 Nothing happens until you ask for it. With `EBITEN_MCP_ADDR` unset, `RunGame` is
 `ebiten.RunGame` and no socket is opened and no goroutine is started, so the line
-can stay in a release build — and can be switched on there when you need it.
+can stay in a release build. Switching it on is a deliberate act, and one to do
+on a machine you control — [see below](#dont-expose-this).
 
 ## Attaching to a game that is already running
 
@@ -37,9 +38,35 @@ EBITEN_MCP_ADDR=127.0.0.1:8384 ./mygame
 ```
 
 That is the whole setup for debugging a kiosk, a dev build, or anything else that
-is already up. For a machine across the network the game listens on `0.0.0.0` and
-the URL points at it; loopback stays the default, which is the right thing for a
-line left in a shipped build. `ebitenmcp find` lists what is running locally.
+is already up. `ebitenmcp find` lists what is running locally.
+
+<a name="dont-expose-this"></a>
+### Do not expose this, and do not leave it on in production
+
+**There is no authentication. None of these tools asks who is calling.** Anyone
+who can open the port can read the game's memory — unexported fields included, so
+whatever it happens to be holding — watch its screen, and type into it. That is
+the entire point of the project, and it is why the address is the only thing
+standing between the game and whoever else is on the network.
+
+So:
+
+- **Never bind a public address.** `0.0.0.0` makes every one of those tools
+  available to anyone who can route to the machine. The game prints a warning on
+  stderr when it starts that way, but the warning is not a mitigation.
+- **Do not leave it enabled in production.** Turning it on to debug something,
+  on a machine you control, and turning it off after is the supported way to use
+  it. A service that runs with `EBITEN_MCP_ADDR` set as a matter of course is a
+  service with a remote-control port on it.
+- **Reach a remote game by forwarding the port, not by opening it:**
+
+  ```sh
+  ssh -L 8384:127.0.0.1:8384 kiosk    # and point the client at 127.0.0.1
+  ```
+
+Leaving the `RunGame` line in a shipped binary is safe and is the intended way to
+use this: with `EBITEN_MCP_ADDR` unset it is `ebiten.RunGame` and nothing else,
+no port and no goroutine. It is setting the variable that opens the door.
 
 If your client cannot talk to an HTTP server — plenty only know how to launch a
 command and speak over a pipe — use the control server instead. It needs no
@@ -114,7 +141,7 @@ pixels in that measurement, and the scale factor squared in general, so around
 thirteen for a 480x320 game filling a 1080p screen. A screenshot pays it once and
 it does not matter; a buffer running for ten minutes pays it thirty-six thousand
 times. Nothing at all is paid while nobody is capturing, which is the line that
-matters for a game in production with the address left set.
+matters for a game you have attached to and are not looking at yet.
 
 **Ask it things.** `game_inspect` walks the game's own state by path,
 *including unexported fields*, because a Go game keeps almost everything

@@ -75,12 +75,22 @@ func Verify() error {
 // package games actually use for edge detection, and confirming it sees the
 // injected state is the whole point.
 func verifyKeys() error {
+	var oldPressed, oldReleased inputTime
+
+	// Saved and put back, rather than zeroed. Verify runs on the first tick, and
+	// Tab is a key somebody may genuinely be holding right then — alt-tabbing
+	// into the window is how you would arrive. Zeroing it would swallow that
+	// press, which is a strange thing for a self-check to do and contradicts
+	// what this function promises.
 	defer update(func(s *inputState) {
-		s.KeyPressedTimes[probeKey] = 0
-		s.KeyReleasedTimes[probeKey] = 0
+		s.KeyPressedTimes[probeKey] = oldPressed
+		s.KeyReleasedTimes[probeKey] = oldReleased
 	})
 
-	update(func(s *inputState) { s.KeyPressedTimes[probeKey] = stamp() })
+	update(func(s *inputState) {
+		oldPressed, oldReleased = s.KeyPressedTimes[probeKey], s.KeyReleasedTimes[probeKey]
+		s.KeyPressedTimes[probeKey] = stamp()
+	})
 	pressed := ebiten.IsKeyPressed(probeKey)
 
 	update(func(s *inputState) { s.KeyReleasedTimes[probeKey] = stamp() })
@@ -98,12 +108,17 @@ func verifyKeys() error {
 func verifyMouse() error {
 	const button = ebiten.MouseButtonMax
 
+	var oldPressed, oldReleased inputTime
+
 	defer update(func(s *inputState) {
-		s.MouseButtonPressedTimes[button] = 0
-		s.MouseButtonReleasedTimes[button] = 0
+		s.MouseButtonPressedTimes[button] = oldPressed
+		s.MouseButtonReleasedTimes[button] = oldReleased
 	})
 
-	update(func(s *inputState) { s.MouseButtonPressedTimes[button] = stamp() })
+	update(func(s *inputState) {
+		oldPressed, oldReleased = s.MouseButtonPressedTimes[button], s.MouseButtonReleasedTimes[button]
+		s.MouseButtonPressedTimes[button] = stamp()
+	})
 	pressed := ebiten.IsMouseButtonPressed(button)
 
 	update(func(s *inputState) { s.MouseButtonReleasedTimes[button] = stamp() })

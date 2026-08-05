@@ -9,7 +9,8 @@ import (
 
 // AddrEnv is the environment variable that turns the server on. Empty means no
 // socket is opened and no goroutine is started, which is why leaving RunGame in
-// a release build costs nothing.
+// a release build costs nothing. Setting it opens an unauthenticated port; bind
+// loopback, and see the README before doing anything else with it.
 const AddrEnv = "EBITEN_MCP_ADDR"
 
 // CaptureEnv overrides which stage captures come from. Set it to "offscreen" in

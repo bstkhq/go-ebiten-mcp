@@ -3,7 +3,8 @@
 //
 // The whole integration is one line, replacing ebiten.RunGame with this
 // package's. Nothing happens until EBITEN_MCP_ADDR is set, so the call can stay
-// in a production build without opening a port or starting a goroutine.
+// in a shipped build without opening a port or starting a goroutine. Setting it
+// is what opens one, and there is no authentication behind it — see the README.
 package ebitenmcp
 
 import (

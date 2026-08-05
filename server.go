@@ -172,7 +172,43 @@ func (s *Server) Close() error {
 // for a client that has to pick between several running games.
 func (s *Server) announce() {
 	fmt.Printf("ebitenmcp: serving %s on %s (media at http://%s/media/)\n", s.opts.Name, s.URL(), s.addr)
+
+	if !loopback(s.addr) {
+		fmt.Fprintf(os.Stderr, "ebitenmcp: WARNING %s is reachable from the network and there is no "+
+			"authentication.\n"+
+			"ebitenmcp: anyone who can open that port can read this game's memory, including "+
+			"unexported fields,\n"+
+			"ebitenmcp: watch its screen, and type into it. Bind 127.0.0.1 and forward the port over "+
+			"ssh instead.\n", s.addr)
+	}
+
 	s.discoveryFile(false)
+}
+
+// loopback reports whether an address is only reachable from this machine.
+//
+// Worth saying out loud when it is not. There is no authentication here — none
+// of these tools asks who is calling — so the address is the entire access
+// control, and a game bound to 0.0.0.0 is a game anyone on the network can drive
+// and read the memory of. That is a reasonable thing to do on a private network
+// with your eyes open, and a very bad thing to do by accident.
+func loopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+
+	// An empty host is what "" and ":8384" mean: every interface.
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+
+	// A name rather than an address. Resolving it here would put a DNS lookup in
+	// the startup path, so only the two spellings that need no lookup count.
+	return host == "localhost"
 }
 
 type discovery struct {
@@ -197,7 +233,13 @@ func (s *Server) discoveryFile(remove bool) {
 		return
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700, and the file written with O_EXCL. Without XDG_RUNTIME_DIR this lands
+	// in /tmp — which is the case in a container, in CI, and under a systemd
+	// unit with no user session, exactly where this runs. There it would
+	// otherwise be world-readable, handing anyone with a shell the port of a
+	// server that has no authentication; and a directory another user got to
+	// first could hold a symlink for this write to follow.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
 
@@ -214,7 +256,15 @@ func (s *Server) discoveryFile(remove bool) {
 		return
 	}
 
-	os.WriteFile(path, data, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		// Already there, or something is in the way. Either way this file is a
+		// convenience for `ebitenmcp find` and not worth insisting on.
+		return
+	}
+	defer f.Close()
+
+	f.Write(data)
 }
 
 // readOnly marks a tool that only looks.

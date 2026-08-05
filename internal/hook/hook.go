@@ -80,6 +80,20 @@ type touch struct {
 
 // inputState mirrors ui.InputState. Fields must stay in declaration order and
 // nothing may be inserted; see the package comment.
+//
+// The array bounds are the load-bearing part, and they come from the public
+// enums while upstream's come from the internal ones. That is safe, and not by
+// luck: ebiten converts between them with a plain numeric cast — input.go does
+// inputstate.Get().IsKeyPressed(ui.Key(key)) — so the two enumerations have to
+// agree value for value or Ebitengine's own IsKeyPressed would read the wrong
+// slot. Measured against v2.9.9: KeyMax is 121 either way, MouseButtonMax 4, and
+// ui.TouchID is an int, which is what makes the touch mirror below the same
+// shape.
+//
+// Nothing here is ever allocated. update casts a pointer Ebitengine already
+// owns, so this struct's total size does not matter; only the offsets of the
+// fields written through it, every one of which Verify checks by reading back
+// through the public API.
 type inputState struct {
 	KeyPressedTimes  [ebiten.KeyMax + 1]inputTime
 	KeyReleasedTimes [ebiten.KeyMax + 1]inputTime
