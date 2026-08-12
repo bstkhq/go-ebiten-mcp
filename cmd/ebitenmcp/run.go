@@ -86,6 +86,11 @@ type runOptions struct {
 	mode string
 }
 
+// usesDisplay is the platform's answer, in a variable so that a test can ask
+// the other one. The branch that matters most here is the branch this build
+// cannot reach.
+var usesDisplay = platformUsesDisplay
+
 func runCommand(args []string) error {
 	opts, args, err := parseRunFlags(args)
 	if err != nil {
@@ -98,9 +103,13 @@ func runCommand(args []string) error {
 
 	env := os.Environ()
 
-	// Only start something if there is nothing to use. Running this on a
-	// desktop should change nothing about how the game looks.
-	if os.Getenv("DISPLAY") == "" {
+	// Only start something if the platform wants one and there is nothing to
+	// use. Running this on a desktop should change nothing about how the game
+	// looks — and on macOS or Windows there is nothing to change: the window
+	// comes from the operating system, DISPLAY is never set, and looking at it
+	// would send `run` hunting for an X server to answer a question nobody
+	// asked. It used to, and the game never started.
+	if usesDisplay && os.Getenv("DISPLAY") == "" {
 		display, where, stop, err := startDisplay(opts)
 		if err != nil {
 			return err
