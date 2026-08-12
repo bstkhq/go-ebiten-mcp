@@ -50,7 +50,12 @@ func Serve(rt *Runtime, opts *Options) (*Server, error) {
 
 	addr := ln.Addr().String()
 
-	s, err := newServer(rt, opts, MediaDir, "http://"+addr)
+	media := opts.MediaDir
+	if media == "" {
+		media = MediaDir
+	}
+
+	s, err := newServer(rt, opts, media, "http://"+addr)
 	if err != nil {
 		ln.Close()
 		return nil, err
