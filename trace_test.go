@@ -1,6 +1,10 @@
 package ebitenmcp
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 // A game whose logger checks isatty keeps seeing one, because the tee hands it
 // the real descriptor. So it goes on emitting colour and every captured line
@@ -30,5 +34,93 @@ func TestStripANSIKeepsTheTextAndDropsTheEscapes(t *testing.T) {
 				t.Errorf("stripANSI(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestTracesSayWhyItHasNothingRatherThanJustNothing.
+//
+// An empty list of lines means two opposite things: the game printed nothing,
+// or nothing was ever captured. The first wants you to look elsewhere; the
+// second wants you to stop expecting this tool to answer on this platform.
+// Descriptor duplication is how the capture works, and Windows has none — so
+// there, silently, game_traces used to answer as though the game had been
+// quiet.
+func TestTracesSayWhyItHasNothingRatherThanJustNothing(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// A ring that never managed to tap anything, which is what a platform
+	// without dup leaves behind.
+	s.traces = newTraceRing()
+	s.traces.setIncomplete(errNoFDCapture)
+
+	_, out, err := s.tracesTool(ctx, nil, tracesInput{})
+	if err != nil {
+		t.Fatalf("game_traces: %v", err)
+	}
+
+	if len(out.Lines) != 0 {
+		t.Fatalf("a ring that captured nothing has %d lines", len(out.Lines))
+	}
+	if out.Unavailable == "" {
+		t.Fatal("it answered with no lines and no reason, which reads as a quiet game")
+	}
+	if !strings.Contains(out.Unavailable, "unix") {
+		t.Errorf("the reason does not say what is missing: %q", out.Unavailable)
+	}
+}
+
+// TestTracesSayHalfACaptureIsHalfACapture is the case that nearly got away.
+//
+// The two descriptors are tapped separately, so stdout can be captured while
+// stderr is not — and stderr is where the panics go. Lines in hand then read as
+// the whole story, which is the failure this was supposed to remove rather than
+// move. Saying it only when there are no lines at all would have left it.
+func TestTracesSayHalfACaptureIsHalfACapture(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	s.traces = newTraceRing()
+	s.traces.add("stdout", "something the game printed", 1)
+	s.traces.setIncomplete(errors.New("stderr is not being captured: no pipes left"))
+
+	_, out, err := s.tracesTool(ctx, nil, tracesInput{})
+	if err != nil {
+		t.Fatalf("game_traces: %v", err)
+	}
+
+	if len(out.Lines) == 0 {
+		t.Fatal("the line went missing")
+	}
+	if out.Unavailable == "" {
+		t.Error("it handed over half a capture as though it were all of it")
+	}
+}
+
+// TestTracesStayQuietWhenTheCaptureIsWhole: nothing about the platform belongs
+// in an answer that has everything.
+func TestTracesStayQuietWhenTheCaptureIsWhole(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	s.traces = newTraceRing()
+	s.traces.add("stdout", "something the game printed", 1)
+
+	_, out, err := s.tracesTool(ctx, nil, tracesInput{})
+	if err != nil {
+		t.Fatalf("game_traces: %v", err)
+	}
+
+	if len(out.Lines) == 0 {
+		t.Fatal("the line went missing")
+	}
+	if out.Unavailable != "" {
+		t.Errorf("it explained itself with a whole capture in hand: %q", out.Unavailable)
 	}
 }

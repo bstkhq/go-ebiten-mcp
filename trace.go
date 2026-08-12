@@ -2,6 +2,7 @@ package ebitenmcp
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,11 @@ type TraceLine struct {
 // cares to make it.
 const traceHistory = 2000
 
+// errNoFDCapture is what a platform without descriptor duplication answers
+// with. It lives here rather than beside that platform's dup so that the answer
+// is one string, and so that the test naming it compiles everywhere.
+var errNoFDCapture = errors.New("ebitenmcp: capturing stdout and stderr needs a unix-like platform")
+
 // traceRing keeps the last few thousand lines the process produced, tagged with
 // the tick they were written in.
 //
@@ -43,6 +49,14 @@ type traceRing struct {
 	n     int
 
 	taps []*fdTap
+
+	// incomplete is why what is here is not everything the process wrote.
+	//
+	// An answer with no lines is indistinguishable from a game that printed
+	// nothing, and the two want opposite things done about them. So is an
+	// answer missing one of the two streams: stdout can be tapped while stderr
+	// is not, and stderr is where the panics go.
+	incomplete error
 }
 
 // fdTap is one redirected descriptor and everything needed to put it back.
@@ -100,25 +114,49 @@ func (t *traceRing) Lines() []TraceLine {
 // must keep seeing their own output, or the tool has quietly broken the thing
 // it was meant to help with.
 func (t *traceRing) capture(tick func() int64) {
-	t.tap(1, "stdout", tick)
-	t.tap(2, "stderr", tick)
+	// Either one failing makes the answer short of the truth, and the first
+	// reason explains it as well as the second would.
+	if err := t.tap(1, "stdout", tick); err != nil {
+		t.setIncomplete(fmt.Errorf("stdout is not being captured: %w", err))
+	}
+	if err := t.tap(2, "stderr", tick); err != nil {
+		t.setIncomplete(fmt.Errorf("stderr is not being captured: %w", err))
+	}
 }
 
-func (t *traceRing) tap(fd int, name string, tick func() int64) {
+func (t *traceRing) setIncomplete(err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.incomplete == nil {
+		t.incomplete = err
+	}
+}
+
+// Incomplete reports why the lines are not everything the process wrote, or nil
+// when they are.
+func (t *traceRing) Incomplete() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.incomplete
+}
+
+func (t *traceRing) tap(fd int, name string, tick func() int64) error {
 	original, err := dupFD(fd)
 	if err != nil {
-		return
+		return err
 	}
 
 	r, w, err := os.Pipe()
 	if err != nil {
-		return
+		return err
 	}
 
 	if err := dupTo(int(w.Fd()), fd); err != nil {
 		r.Close()
 		w.Close()
-		return
+		return err
 	}
 
 	passthrough := os.NewFile(uintptr(original), "original-"+name)
@@ -136,6 +174,8 @@ func (t *traceRing) tap(fd int, name string, tick func() int64) {
 	t.mu.Lock()
 	t.taps = append(t.taps, tap)
 	t.mu.Unlock()
+
+	return nil
 }
 
 // stop puts the descriptors back and waits for everything already written to
