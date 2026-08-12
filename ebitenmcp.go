@@ -39,6 +39,16 @@ type Options struct {
 	// its own final screen.
 	CaptureStage Stage
 
+	// MediaDir is where screenshots, videos and profiles are written. Empty
+	// means the package's MediaDir, relative to the working directory.
+	//
+	// Which is fine wherever a game is started from a shell, and is the wrong
+	// bet inside an app bundle: a working directory that cannot be written to
+	// stops newMedia creating the default, Serve returns that error, and Wrap
+	// carries on with no server at all. Give it somewhere writable on any
+	// platform where you do not choose the working directory. See WithMediaDir.
+	MediaDir string
+
 	// States are named snapshots the game publishes, reachable as @name from
 	// game_inspect. See WithState.
 	States map[string]StateProvider
@@ -50,6 +60,15 @@ type Option func(*Options)
 // WithAddr overrides the listen address, ignoring the environment.
 func WithAddr(addr string) Option {
 	return func(o *Options) { o.Addr = addr }
+}
+
+// WithMediaDir puts the artifacts somewhere writable.
+//
+// The default is relative to the working directory, which an app packaged for a
+// phone does not choose and generally cannot write to. Pass a directory the
+// platform hands the app — Context.getFilesDir() on Android, Documents on iOS.
+func WithMediaDir(dir string) Option {
+	return func(o *Options) { o.MediaDir = dir }
 }
 
 // WithName sets the name reported to clients.

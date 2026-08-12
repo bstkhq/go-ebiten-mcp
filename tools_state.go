@@ -34,7 +34,8 @@ func (s *Server) addStateTools(srv *mcpsdk.Server) {
 		Name: "game_traces",
 		Description: "Lines the process wrote to stdout and stderr, tagged with the tick they " +
 			"were written in. Captured at the file descriptor, so this includes output from " +
-			"libraries and from C, not only from the game's own logger.",
+			"libraries and from C, not only from the game's own logger. That needs a unix-like " +
+			"platform; where there is none the answer says so rather than looking like a quiet game.",
 		Annotations: readOnly("Traces"),
 	}, s.tracesTool)
 
@@ -231,8 +232,17 @@ func (s *Server) tracesTool(_ context.Context, _ *mcpsdk.CallToolRequest, in tra
 	}
 
 	lines := filterTraces(s.traces.Lines(), in.Stream, in.Contains, in.SinceTick, in.Limit)
+	out := TracesOutput{Lines: lines, Total: len(lines), Tick: s.rt.Tick()}
 
-	return nil, TracesOutput{Lines: lines, Total: len(lines), Tick: s.rt.Tick()}, nil
+	// Whenever the capture is short of what it should be, not only when it
+	// came back with nothing. The two descriptors are tapped separately, so
+	// stdout can be captured while stderr is not — and stderr is where the
+	// panics go. Lines in hand would then read as the whole story.
+	if err := s.traces.Incomplete(); err != nil {
+		out.Unavailable = err.Error()
+	}
+
+	return nil, out, nil
 }
 
 // ---------------------------------------------------------------------------

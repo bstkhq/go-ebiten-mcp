@@ -290,6 +290,11 @@ type TracesOutput struct {
 	Lines []TraceLine `json:"lines"`
 	Tick  int64       `json:"tick"`
 	Total int         `json:"total"`
+
+	// Unavailable says why these lines are not everything the process wrote:
+	// no capture at all on a platform without descriptor duplication, or one
+	// of the two streams missing. Absent when the capture is whole.
+	Unavailable string `json:"unavailable,omitempty"`
 }
 
 // ProfileOutput is game_profile's answer.

@@ -129,26 +129,38 @@ in a container if the machine has no X — see the [guide](docs/guide.md).
 | `WithCaptureStage` | the same as `EBITEN_MCP_CAPTURE`, in code |
 | `WithState` | publish a named snapshot, reachable as `@name` |
 | `WithAddr` | the address, ignoring the environment |
+| `WithMediaDir` | where screenshots and video are written; the default is relative to the working directory |
 
 ## Compatibility
 
-Ebitengine **v2.9.9**, pinned. There are no tagged releases yet, so `@latest` is
-the version to ask for.
+Ebitengine **v2.9.9**, pinned.
 
 | | Linux | macOS | Windows | Android / iOS |
 |---|---|---|---|---|
 | see, drive, pause, inspect, profile | yes | yes | yes | yes |
-| `game_traces` | yes | yes | no | builds, but stdout goes to the platform log |
+| `game_traces` | yes | yes | no | builds |
 | `game_gamepad` | yes | no | no | no |
 | `ebitenmcp x` | yes | no | no | n/a |
 
-Linux runs the whole suite in CI. macOS and Windows build there and run what
-needs no display; Android and iOS are built for, not run. Nothing that is
-missing fails quietly — each tool says so.
+CI runs the whole suite on Linux; on macOS and Windows it builds and runs what
+needs no display, and for Android and iOS it builds. A tool that cannot do its
+job on a platform says so — `game_traces` names the platform, `game_gamepad`
+names the device it needs — rather than answering as though there were nothing
+to report.
 
-On mobile the entry point is different: an app calls `mobile.SetGame` rather
-than `ebiten.RunGame`, so use `Wrap`, which returns the wrapped game and the
-runtime and starts the server itself.
+On mobile the entry point is different, and so are two of the defaults:
+
+```go
+wrapped, _ := ebitenmcp.Wrap(&Game{},
+    ebitenmcp.WithAddr("127.0.0.1:8384"),          // no environment on a phone
+    ebitenmcp.WithMediaDir(filesDir+"/ebitenmcp"), // the working directory is not writable
+)
+mobile.SetGame(wrapped)
+```
+
+`filesDir` is whatever the platform hands the app — `Context.getFilesDir()` on
+Android, the app's Documents on iOS. Android needs the `INTERNET` permission in
+its manifest for the listener.
 
 `GOOS=js` compiles, and cannot serve: WebAssembly has no listening sockets. With
 no address configured that costs nothing, so the line is safe to leave in a
