@@ -105,6 +105,11 @@ func newXOptions() xOptions {
 func xCommand(args []string) error {
 	opts := newXOptions()
 
+	if !usesDisplay {
+		return fmt.Errorf("there is no X display on this platform and Ebitengine does not want one: " +
+			"a game opens its own window, so `ebitenmcp run` needs nothing arranged first")
+	}
+
 	if len(args) == 0 {
 		return fmt.Errorf("x needs start, stop or status")
 	}

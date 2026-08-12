@@ -118,6 +118,9 @@ ebitenmcp run --gpu ./mygame     # rendering on the GPU
 With `DISPLAY` already set it changes nothing. Without one it starts a display,
 in a container if the machine has no X — see the [guide](docs/guide.md).
 
+On macOS and Windows there is nothing to arrange: a game opens its own window,
+so `run` only switches the server on and starts it.
+
 ## Configuration
 
 | | |
