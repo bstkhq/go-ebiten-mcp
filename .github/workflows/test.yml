@@ -109,11 +109,18 @@ jobs:
           goarch=${goos#*/}
           goos=${goos%/*}
 
-          # Both need cgo. Android takes the NDK's clang, which the runner image
-          # already has; iOS takes Xcode's, which the macOS runner already has.
+          # Both need cgo, and both need to be told which platform's headers to
+          # use — left alone each picks the host's.
           if [ "$goos" = android ]; then
             ndk="${ANDROID_NDK_ROOT:?the runner image is expected to have an NDK}"
             export CC="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/${goarch/arm64/aarch64}-linux-android21-clang"
+          else
+            # Without the sysroot clang reaches for MacOSX.sdk, where UIKit does
+            # not exist and half of CoreHaptics is marked unavailable, and the
+            # errors name Ebitengine rather than the missing flag.
+            sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+            flags="-isysroot $sdk -miphoneos-version-min=13.0 -arch $goarch"
+            export CGO_CFLAGS="$flags" CGO_LDFLAGS="$flags"
           fi
 
           CGO_ENABLED=1 GOOS=$goos GOARCH=$goarch go build ./...
