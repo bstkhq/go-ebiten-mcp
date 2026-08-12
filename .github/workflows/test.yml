@@ -5,7 +5,10 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # Linux is where the whole thing runs: the display, the virtual gamepad, the
+  # descriptor capture. Everything below this job is about the platforms where
+  # only some of it does.
+  linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -44,3 +47,89 @@ jobs:
       # input injection has to keep passing without it. See the Makefile.
       - name: Suite without injection
         run: make test-nohook
+
+  # The README claims macOS and Windows for everything except the gamepad, the
+  # trace capture and the containerised display. This is what turns that claim
+  # into something checked rather than believed.
+  #
+  # No display on either runner, so what runs is what does not need one. That is
+  # less than the Linux job by a lot, and it still catches the failure that
+  # matters here: a platform-specific file that stopped compiling.
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # cmd/ebitenmcp is the launcher and the client; internal/upstream is the
+      # mirror checksum; internal/uinput compiles to a stub that says why there
+      # are no gamepads here. None of the three opens a window.
+      - name: Tests that need no display
+        run: go test -count=1 ./cmd/ebitenmcp ./internal/upstream ./internal/uinput
+
+  # Nobody here has an iPhone or an Android to run this on, so the honest check
+  # is that it builds for them. Ebitengine on mobile is not RunGame — an app
+  # calls mobile.SetGame — which is why Wrap exists and returns the wrapped game
+  # and the runtime separately.
+  mobile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: android/arm64
+            runs-on: ubuntu-latest
+          - target: ios/arm64
+            runs-on: macos-latest
+
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build for ${{ matrix.target }}
+        shell: bash
+        run: |
+          goos=${{ matrix.target }}
+          goarch=${goos#*/}
+          goos=${goos%/*}
+
+          # Both need cgo. Android takes the NDK's clang, which the runner image
+          # already has; iOS takes Xcode's, which the macOS runner already has.
+          if [ "$goos" = android ]; then
+            ndk="${ANDROID_NDK_ROOT:?the runner image is expected to have an NDK}"
+            export CC="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/${goarch/arm64/aarch64}-linux-android21-clang"
+          fi
+
+          CGO_ENABLED=1 GOOS=$goos GOARCH=$goarch go build ./...
+
+  # WebAssembly compiles, and that is all it can do: there are no listening
+  # sockets, so the server cannot bind. Worth building anyway — a game that
+  # targets the browser should not stop compiling because this line is in it,
+  # and with no address configured Wrap starts nothing at all.
+  wasm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - run: GOOS=js GOARCH=wasm go build ./...

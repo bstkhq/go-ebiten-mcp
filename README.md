@@ -135,12 +135,24 @@ in a container if the machine has no X — see the [guide](docs/guide.md).
 Ebitengine **v2.9.9**, pinned. There are no tagged releases yet, so `@latest` is
 the version to ask for.
 
-| | Linux | macOS | Windows |
-|---|---|---|---|
-| see, drive, pause, inspect, profile | yes | yes | yes |
-| `game_traces` | yes | yes | no |
-| `game_gamepad` | yes | no | no |
-| `ebitenmcp x` | yes | no | no |
+| | Linux | macOS | Windows | Android / iOS |
+|---|---|---|---|---|
+| see, drive, pause, inspect, profile | yes | yes | yes | yes |
+| `game_traces` | yes | yes | no | builds, but stdout goes to the platform log |
+| `game_gamepad` | yes | no | no | no |
+| `ebitenmcp x` | yes | no | no | n/a |
+
+Linux runs the whole suite in CI. macOS and Windows build there and run what
+needs no display; Android and iOS are built for, not run. Nothing that is
+missing fails quietly — each tool says so.
+
+On mobile the entry point is different: an app calls `mobile.SetGame` rather
+than `ebiten.RunGame`, so use `Wrap`, which returns the wrapped game and the
+runtime and starts the server itself.
+
+`GOOS=js` compiles, and cannot serve: WebAssembly has no listening sockets. With
+no address configured that costs nothing, so the line is safe to leave in a
+browser build.
 
 Your MCP client needs tool support, and ideally image support — about half of
 what comes back is a picture.
