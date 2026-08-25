@@ -27,6 +27,9 @@ const AddrEnv = "EBITEN_MCP_ADDR"
 // CaptureEnv overrides which drawing stage captures come from.
 const CaptureEnv = "EBITEN_MCP_CAPTURE"
 
+// PanicRecoveryEnv enables recovery of panics raised by game callbacks.
+const PanicRecoveryEnv = "EBITEN_MCP_RECOVER_PANICS"
+
 // RendererEnv is how `ebitenmcp run` tells the game which renderer it ended up
 // with, so a golden image can be tagged with it.
 const RendererEnv = "EBITENMCP_RENDERER"

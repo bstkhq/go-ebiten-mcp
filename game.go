@@ -93,19 +93,21 @@ func (w *wrapper) Update() error {
 	return err
 }
 
-// updateGame calls the game and turns a panic into recorded state instead of a
-// dead process.
+// updateGame calls the game and, when panic recovery was requested, turns a
+// panic into recorded state instead of a dead process.
 //
 // Surviving the game's own crash is the point: the frames, the traces and the
 // stack are all still there to be asked about, which is the difference between
 // this and finding a stack trace in a terminal after the fact.
 func (w *wrapper) updateGame() (err error) {
-	defer func() {
-		if v := recover(); v != nil {
-			w.rt.recordCrash("update", v)
-			err = nil
-		}
-	}()
+	if w.rt.recoverPanics {
+		defer func() {
+			if v := recover(); v != nil {
+				w.rt.recordCrash("update", v)
+				err = nil
+			}
+		}()
+	}
 
 	return w.rt.currentGame().Update()
 }
@@ -202,17 +204,19 @@ func (w *wrapper) keepFinalPassAlive(screen *ebiten.Image) {
 }
 
 func (w *wrapper) drawGame(screen *ebiten.Image) {
-	defer func() {
-		if v := recover(); v != nil {
-			w.rt.recordCrash("draw", v)
+	if w.rt.recoverPanics {
+		defer func() {
+			if v := recover(); v != nil {
+				w.rt.recordCrash("draw", v)
 
-			// Grab whatever the game managed to draw before it died. The
-			// screen is cleared at the start of every frame, so this half-drawn
-			// image only exists right here, and it is often the most useful
-			// thing in the whole report.
-			w.rt.keepFrame(screen)
-		}
-	}()
+				// Grab whatever the game managed to draw before it died. The
+				// screen is cleared at the start of every frame, so this half-drawn
+				// image only exists right here, and it is often the most useful
+				// thing in the whole report.
+				w.rt.keepFrame(screen)
+			}
+		}()
+	}
 
 	w.rt.currentGame().Draw(screen)
 }
@@ -251,19 +255,21 @@ func (w *wrapper) drawCrash(screen *ebiten.Image, crash *Crash) {
 		crash.Phase, crash.Tick, crash.Value), 8, 6)
 }
 
-// Layout forwards to the game, catching a panic the same way Update and Draw
-// do.
+// Layout forwards to the game, optionally catching a panic the same way Update
+// and Draw do.
 //
 // It was the one phase without a net, and Ebitengine calls it every frame — so
 // "the game panicked and the server is still answering" was a promise that did
 // not cover a resize, or a field read before it was set up.
 func (w *wrapper) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
-	defer func() {
-		if v := recover(); v != nil {
-			w.rt.recordCrash("layout", v)
-			screenWidth, screenHeight = w.layoutFallback(outsideWidth, outsideHeight)
-		}
-	}()
+	if w.rt.recoverPanics {
+		defer func() {
+			if v := recover(); v != nil {
+				w.rt.recordCrash("layout", v)
+				screenWidth, screenHeight = w.layoutFallback(outsideWidth, outsideHeight)
+			}
+		}()
+	}
 
 	screenWidth, screenHeight = w.rt.currentGame().Layout(outsideWidth, outsideHeight)
 	w.rememberLayout(screenWidth, screenHeight)
@@ -306,14 +312,16 @@ func (w *wrapper) layoutFallback(outsideWidth, outsideHeight int) (int, int) {
 type wrapperLayoutF struct{ *wrapper }
 
 func (w *wrapperLayoutF) LayoutF(outsideWidth, outsideHeight float64) (screenWidth, screenHeight float64) {
-	defer func() {
-		if v := recover(); v != nil {
-			w.rt.recordCrash("layout", v)
+	if w.rt.recoverPanics {
+		defer func() {
+			if v := recover(); v != nil {
+				w.rt.recordCrash("layout", v)
 
-			width, height := w.layoutFallback(int(outsideWidth), int(outsideHeight))
-			screenWidth, screenHeight = float64(width), float64(height)
-		}
-	}()
+				width, height := w.layoutFallback(int(outsideWidth), int(outsideHeight))
+				screenWidth, screenHeight = float64(width), float64(height)
+			}
+		}()
+	}
 
 	if g, ok := w.rt.currentGame().(ebiten.LayoutFer); ok {
 		screenWidth, screenHeight = g.LayoutF(outsideWidth, outsideHeight)
@@ -391,11 +399,13 @@ func (w *wrapper) drawFinalScreen(screen ebiten.FinalScreen, offscreen *ebiten.I
 // whole number, and a hand-rolled linear blit would quietly change how the game
 // looks the moment SetGame swapped in a game without a pass of its own.
 func (w *wrapper) finalPass(screen ebiten.FinalScreen, offscreen *ebiten.Image, geoM ebiten.GeoM) {
-	defer func() {
-		if v := recover(); v != nil {
-			w.rt.recordCrash("final", v)
-		}
-	}()
+	if w.rt.recoverPanics {
+		defer func() {
+			if v := recover(); v != nil {
+				w.rt.recordCrash("final", v)
+			}
+		}()
+	}
 
 	// A game that has already died does not get called again here either. Its
 	// final pass is as likely to panic as the Draw that just did, and

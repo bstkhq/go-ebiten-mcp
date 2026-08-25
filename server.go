@@ -183,10 +183,11 @@ const instructions = `This game is running and can be looked at while it runs.
 
 Four things worth knowing before the first call:
 
-- Start with game_state. It says whether the loop is running, paused, or has
-  panicked, and it keeps answering when the game itself has stopped — as do
-  game_traces and game_goroutines. A tool that hangs is not the same as a game
-  that crashed, and these tell you which you have.
+- Start with game_state. It says whether the loop is running or paused and, when
+  panic recovery is enabled, whether it panicked; in that case it keeps
+  answering when the game itself has stopped — as do game_traces and
+  game_goroutines. A tool that hangs is not the same as a game that crashed,
+  and these tell you which you have.
 - game_frames is retrospective, but it has to be switched on before the thing
   you want to see. Enable it, reproduce the problem, then ask; asking first
   gets you nothing.

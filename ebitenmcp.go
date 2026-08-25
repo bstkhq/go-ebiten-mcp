@@ -20,11 +20,21 @@ const AddrEnv = wire.AddrEnv
 // the default.
 const CaptureEnv = wire.CaptureEnv
 
+// PanicRecoveryEnv is EBITEN_MCP_RECOVER_PANICS. Set it to "1" to catch game
+// panics and keep the MCP server answering. Unset or any other value leaves
+// Ebitengine's normal panic behaviour unchanged.
+const PanicRecoveryEnv = wire.PanicRecoveryEnv
+
 // Options configures a wrapped game.
 type Options struct {
 	// Addr is the address the MCP server listens on. Defaults to
 	// EBITEN_MCP_ADDR; empty means do not serve.
 	Addr string
+
+	// RecoverPanics keeps the server answering after the game panics. It defaults
+	// to whether EBITEN_MCP_RECOVER_PANICS is "1"; otherwise a wrapped game
+	// preserves Ebitengine's normal panic behaviour.
+	RecoverPanics bool
 
 	// Name identifies this game to a client that finds several running.
 	Name string
@@ -60,6 +70,13 @@ type Option func(*Options)
 // WithAddr overrides the listen address, ignoring the environment.
 func WithAddr(addr string) Option {
 	return func(o *Options) { o.Addr = addr }
+}
+
+// WithPanicRecovery controls whether panics raised by the game's Update, Draw,
+// Layout and final-screen callbacks are recorded while the MCP server keeps
+// answering. It overrides EBITEN_MCP_RECOVER_PANICS.
+func WithPanicRecovery(enabled bool) Option {
+	return func(o *Options) { o.RecoverPanics = enabled }
 }
 
 // WithMediaDir puts the artifacts somewhere writable.
@@ -105,9 +122,10 @@ func WithState(name string, fn StateProvider) Option {
 
 func newOptions(opts []Option) *Options {
 	o := &Options{
-		Addr:         os.Getenv(AddrEnv),
-		Name:         defaultName(),
-		CaptureStage: captureStageFromEnv(),
+		Addr:          os.Getenv(AddrEnv),
+		Name:          defaultName(),
+		CaptureStage:  captureStageFromEnv(),
+		RecoverPanics: os.Getenv(PanicRecoveryEnv) == "1",
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -145,12 +163,17 @@ func baseName(path string) string {
 // to ebiten.RunGame.
 //
 // The server starts here rather than in RunGame so that a custom runner gets it
-// too. With no address configured nothing is started at all.
+// too. Calling Wrap explicitly always installs the wrapper, because its Runtime
+// is useful to custom runners and tests even without a server. RunGame bypasses
+// the wrapper when no server is available.
 func Wrap(game ebiten.Game, opts ...Option) (ebiten.Game, *Runtime) {
-	o := newOptions(opts)
+	return wrapWithOptions(game, newOptions(opts))
+}
 
+func wrapWithOptions(game ebiten.Game, o *Options) (ebiten.Game, *Runtime) {
 	rt := newRuntime(game)
 	rt.factory = o.Factory
+	rt.recoverPanics = o.RecoverPanics
 	for name, fn := range o.States {
 		rt.RegisterState(name, fn)
 	}
@@ -172,6 +195,27 @@ func Wrap(game ebiten.Game, opts ...Option) (ebiten.Game, *Runtime) {
 	return wrap(rt), rt
 }
 
+// gameForRun keeps RunGame a drop-in replacement when MCP is not available.
+// In that case there must be no wrapper to recover the game's panics: Ebitengine
+// should see them exactly as it would if it had been called directly.
+func gameForRun(game ebiten.Game, opts []Option) (ebiten.Game, *Runtime) {
+	o := newOptions(opts)
+	if o.Addr == "" {
+		return game, nil
+	}
+
+	wrapped, rt := wrapWithOptions(game, o)
+	if rt.server == nil {
+		// Serve already reported why it could not start. With nobody able to
+		// inspect a recorded crash, carrying on with the wrapper would only hide
+		// the panic from the program that owns the game.
+		_ = rt.Close()
+		return game, nil
+	}
+
+	return wrapped, rt
+}
+
 // RunGame is a drop-in replacement for ebiten.RunGame.
 //
 // The game runs exactly as it would have. With EBITEN_MCP_ADDR set it also
@@ -182,8 +226,10 @@ func RunGame(game ebiten.Game, opts ...Option) error {
 
 // RunGameWithOptions is a drop-in replacement for ebiten.RunGameWithOptions.
 func RunGameWithOptions(game ebiten.Game, ebitenOptions *ebiten.RunGameOptions, opts ...Option) error {
-	wrapped, rt := Wrap(game, opts...)
-	defer rt.Close()
+	game, rt := gameForRun(game, opts)
+	if rt != nil {
+		defer rt.Close()
+	}
 
-	return ebiten.RunGameWithOptions(wrapped, ebitenOptions)
+	return ebiten.RunGameWithOptions(game, ebitenOptions)
 }
