@@ -27,7 +27,7 @@ import (
 // failure of the tool that reported it.
 var ErrLoopStalled = errors.New("ebitenmcp: the game loop did not run the request in time")
 
-// Crash records a panic the wrapped game raised.
+// Crash records a panic the wrapped game raised when panic recovery is enabled.
 type Crash struct {
 	Value string    `json:"value"`
 	Stack string    `json:"stack"`
@@ -72,6 +72,11 @@ type Runtime struct {
 	steps       int
 	terminating bool
 	crash       *Crash
+
+	// Fixed before the loop starts. Game callbacks only recover a panic when
+	// the caller explicitly enabled it; otherwise the panic reaches Ebitengine
+	// unchanged.
+	recoverPanics bool
 
 	// Work queued from other goroutines to run inside Update. Two queues,
 	// because there are two moments in a tick worth running at and they are on

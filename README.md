@@ -75,8 +75,12 @@ path reaches a value, which is what makes a sequence deterministic. Every input
 tool takes `then_wait_ticks` and `then_screenshot`, so press-wait-look is one
 call.
 
-A panic in the game is caught and recorded with its stack, its tick and the last
-frame drawn. The game stops; the server keeps answering.
+Panic recovery is opt-in. Set `EBITEN_MCP_RECOVER_PANICS=1` or pass
+`WithPanicRecovery(true)` to catch a panic in the game and record its stack,
+tick and last frame drawn; the game stops and the server keeps answering.
+Without either, panics propagate normally.
+`EBITEN_MCP_RECOVER_PANICS` does not turn the server on; that still requires
+`EBITEN_MCP_ADDR`.
 
 ## Tests
 
@@ -127,11 +131,13 @@ so `run` only switches the server on and starts it.
 |---|---|
 | `EBITEN_MCP_ADDR` | where to listen. Unset means do not serve |
 | `EBITEN_MCP_CAPTURE` | `offscreen` to skip the screen-sized copy a final pass needs |
+| `EBITEN_MCP_RECOVER_PANICS` | `1` to catch game panics and keep MCP answering; off by default |
 | `WithName` | what a client sees when several games are running |
 | `WithFactory` | how to build a fresh game, for `game_reset` and the test driver |
 | `WithCaptureStage` | the same as `EBITEN_MCP_CAPTURE`, in code |
 | `WithState` | publish a named snapshot, reachable as `@name` |
 | `WithAddr` | the address, ignoring the environment |
+| `WithPanicRecovery` | override `EBITEN_MCP_RECOVER_PANICS` in code |
 | `WithMediaDir` | where screenshots and video are written; the default is relative to the working directory |
 
 ## Compatibility

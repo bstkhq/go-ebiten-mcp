@@ -64,6 +64,7 @@ func main() {
 	if err := ebitenmcp.RunGame(game,
 		ebitenmcp.WithName("playground"),
 		ebitenmcp.WithFactory(func() ebiten.Game { return NewGame() }),
+		ebitenmcp.WithPanicRecovery(true),
 		summary,
 	); err != nil {
 		log.Fatal(err)

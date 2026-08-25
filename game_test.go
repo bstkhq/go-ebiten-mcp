@@ -182,7 +182,7 @@ func TestMain(m *testing.M) {
 	fill := color.RGBA{R: 0x20, G: 0x40, B: 0x80, A: 0xff}
 	factory := func() ebiten.Game { return newProbeGame(fill) }
 
-	wrapped, rt := Wrap(factory(), WithFactory(factory))
+	wrapped, rt := Wrap(factory(), WithFactory(factory), WithPanicRecovery(true))
 	testRT = rt
 
 	// The live wrapper, for the one test that has to look at what it is holding.
@@ -743,11 +743,110 @@ func TestWrapSelectsWrapperType(t *testing.T) {
 	}
 }
 
+// TestRunGameDoesNotWrapWithoutAServer is the release-build half of the
+// integration contract: with EBITEN_MCP_ADDR unset, RunGame really is
+// Ebitengine's RunGame. In particular there is no wrapper present to recover a
+// panic into a Runtime that nobody can reach.
+func TestRunGameDoesNotWrapWithoutAServer(t *testing.T) {
+	t.Setenv(AddrEnv, "")
+
+	game := &panickingGame{}
+	got, rt := gameForRun(game, nil)
+
+	if got != game {
+		t.Errorf("gameForRun returned %T, want the original game", got)
+	}
+	if rt != nil {
+		t.Error("gameForRun built a Runtime with no MCP server configured")
+	}
+
+	var value any
+	func() {
+		defer func() { value = recover() }()
+		_ = got.Update()
+	}()
+	if value != panicValue {
+		t.Errorf("Update panicked with %v, want %q", value, panicValue)
+	}
+}
+
+func TestPanicRecoveryIsOptIn(t *testing.T) {
+	t.Setenv(PanicRecoveryEnv, "")
+
+	t.Run("off by default", func(t *testing.T) {
+		wrapped, rt := Wrap(&panickingGame{}, WithAddr(""))
+
+		var value any
+		func() {
+			defer func() { value = recover() }()
+			_ = wrapped.(*wrapper).updateGame()
+		}()
+
+		if value != panicValue {
+			t.Errorf("Update panicked with %v, want %q", value, panicValue)
+		}
+		if crash := rt.Crash(); crash != nil {
+			t.Errorf("default recovery recorded a crash: %+v", crash)
+		}
+	})
+
+	t.Run("enabled explicitly", func(t *testing.T) {
+		wrapped, rt := Wrap(&panickingGame{}, WithAddr(""), WithPanicRecovery(true))
+
+		if err := wrapped.(*wrapper).updateGame(); err != nil {
+			t.Fatalf("Update returned %v after recovering the panic", err)
+		}
+		crash := rt.Crash()
+		if crash == nil {
+			t.Fatal("the opted-in recovery did not record the panic")
+		}
+		if crash.Phase != "update" || crash.Value != panicValue {
+			t.Errorf("recorded crash is %+v, want the Update panic %q", crash, panicValue)
+		}
+	})
+
+	t.Run("enabled by environment", func(t *testing.T) {
+		t.Setenv(PanicRecoveryEnv, "1")
+		wrapped, rt := Wrap(&panickingGame{}, WithAddr(""))
+
+		if err := wrapped.(*wrapper).updateGame(); err != nil {
+			t.Fatalf("Update returned %v after recovering the panic", err)
+		}
+		if crash := rt.Crash(); crash == nil || crash.Value != panicValue {
+			t.Errorf("environment-enabled recovery recorded %+v, want %q", crash, panicValue)
+		}
+	})
+
+	t.Run("option overrides environment", func(t *testing.T) {
+		t.Setenv(PanicRecoveryEnv, "1")
+		wrapped, rt := Wrap(&panickingGame{}, WithAddr(""), WithPanicRecovery(false))
+
+		var value any
+		func() {
+			defer func() { value = recover() }()
+			_ = wrapped.(*wrapper).updateGame()
+		}()
+
+		if value != panicValue {
+			t.Errorf("Update panicked with %v, want %q", value, panicValue)
+		}
+		if crash := rt.Crash(); crash != nil {
+			t.Errorf("disabled recovery recorded a crash: %+v", crash)
+		}
+	})
+}
+
 type plainGame struct{}
 
 func (*plainGame) Update() error              { return nil }
 func (*plainGame) Draw(*ebiten.Image)         {}
 func (*plainGame) Layout(int, int) (int, int) { return 1, 1 }
+
+const panicValue = "the game's panic must stay visible"
+
+type panickingGame struct{ plainGame }
+
+func (*panickingGame) Update() error { panic(panicValue) }
 
 type layoutFGame struct{ plainGame }
 
