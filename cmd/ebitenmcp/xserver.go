@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -88,7 +89,10 @@ const x11SocketDir = "/tmp/.X11-unix"
 // renderNode is the only piece of the GPU the container is given. A render node
 // is enough for rendering and grants nothing else — no modesetting, no other
 // client's buffers — which is what makes this work without privileges.
-const renderNode = "/dev/dri/renderD128"
+const (
+	renderNode           = "/dev/dri/renderD128"
+	renderNodeVendorPath = "/sys/class/drm/renderD128/device/vendor"
+)
 
 type xOptions struct {
 	gpu    bool
@@ -131,6 +135,15 @@ func xCommand(args []string) error {
 		if err != nil {
 			return err
 		}
+		found := rendererForMode(display, opts.gpu)
+		if opts.gpu {
+			if err := requireHardwareRenderer(found); err != nil {
+				if started {
+					err = errors.Join(err, stopXContainer(opts))
+				}
+				return err
+			}
+		}
 
 		what := "X server on"
 		if !started {
@@ -140,7 +153,7 @@ func xCommand(args []string) error {
 		fmt.Println(display)
 		fmt.Fprintf(os.Stderr, "ebitenmcp: %s %s, rendering with %s\n"+
 			"ebitenmcp: use it with DISPLAY=%s, and stop it with `ebitenmcp x stop`\n",
-			what, display, renderer(display), display)
+			what, display, found, display)
 		return nil
 
 	case "stop":
@@ -251,8 +264,9 @@ func startXContainer(ctx context.Context, opts xOptions) (display string, starte
 		}
 	}
 
-	// A container left behind by an earlier run whose display is gone.
-	engineRun(engine, "rm", "-f", opts.name)
+	// A container left behind by an earlier run whose display is gone. Its
+	// filesystem socket is outside the container and must go with it.
+	_ = removeXContainer(engine, opts.name)
 
 	image, err := ensureImage(ctx, engine, opts)
 	if err != nil {
@@ -264,12 +278,16 @@ func startXContainer(ctx context.Context, opts xOptions) (display string, starte
 		return "", false, err
 	}
 
-	run := []string{
-		"run", "-d", "--name", opts.name,
-		"-v", x11SocketDir + ":" + x11SocketDir,
-	}
+	var run []string
 	if opts.gpu {
-		run = append(run, "--device", renderNode)
+		run = append(run, gpuContainerGlobalArgs(engine)...)
+	}
+	run = append(run,
+		"run", "-d", "--name", opts.name,
+		"-v", x11SocketDir+":"+x11SocketDir,
+	)
+	if opts.gpu {
+		run = append(run, gpuContainerArgs(engine)...)
 	}
 	run = append(run, image, "sh", "-c", westonCommand(opts, width, height))
 
@@ -281,10 +299,29 @@ func startXContainer(ctx context.Context, opts xOptions) (display string, starte
 	display, err = waitForXwayland(engine, opts.name)
 	if err != nil {
 		logs, _ := engineCombined(engine, "logs", opts.name)
-		engineRun(engine, "rm", "-f", opts.name)
+		_ = removeXContainer(engine, opts.name)
 		return "", false, fmt.Errorf("%w\n%s", err, tail(string(logs), 15))
 	}
 	return display, true, nil
+}
+
+// Rootless podman otherwise drops the supplementary render group. The device
+// still appears inside the container, so checking only for its path says GPU
+// while Weston quietly falls back to software. keep-groups needs crun; podman
+// reports that requirement directly on hosts still configured with runc.
+func gpuContainerArgs(engine string) []string {
+	args := []string{"--device", renderNode}
+	if filepath.Base(engine) == "podman" {
+		args = append(args, "--group-add", "keep-groups")
+	}
+	return args
+}
+
+func gpuContainerGlobalArgs(engine string) []string {
+	if filepath.Base(engine) == "podman" {
+		return []string{"--runtime", "crun"}
+	}
+	return nil
 }
 
 // westonCommand is the whole of the logic that runs inside the container, and
@@ -342,16 +379,24 @@ func runningDisplay(engine string, opts xOptions) (string, bool) {
 		return "", false
 	}
 
-	logs, err := engineCombined(engine, "logs", opts.name)
+	display, ok := containerDisplay(engine, opts.name)
+	if !ok {
+		return "", false
+	}
+	if _, err := os.Stat(socketPath(display)); err != nil {
+		return "", false
+	}
+	return display, true
+}
+
+func containerDisplay(engine, name string) (string, bool) {
+	logs, err := engineCombined(engine, "logs", name)
 	if err != nil {
 		return "", false
 	}
 
 	m := xwaylandDisplay.FindStringSubmatch(string(logs))
 	if m == nil {
-		return "", false
-	}
-	if _, err := os.Stat(socketPath(m[1])); err != nil {
 		return "", false
 	}
 	return m[1], true
@@ -367,7 +412,7 @@ func runningDisplay(engine string, opts xOptions) (string, bool) {
 // asked of something that has to answer it honestly.
 func hasGPU(engine, name string) bool {
 	return engineRun(engine, "exec", name,
-		"sh", "-c", "test -e "+renderNode) == nil
+		"sh", "-c", "test -r "+renderNode+" && test -w "+renderNode) == nil
 }
 
 func stopXContainer(opts xOptions) error {
@@ -376,20 +421,32 @@ func stopXContainer(opts xOptions) error {
 		return err
 	}
 
-	// Read the display before killing the container: the socket it created
-	// lives in the shared directory and outlives it, so display numbers would
-	// creep upwards forever as stale files accumulated.
-	display, running := runningDisplay(engine, opts)
-
-	out, err := engineCombined(engine, "rm", "-f", opts.name)
-	if err != nil {
-		return fmt.Errorf("stopping the X server: %s", strings.TrimSpace(string(out)))
-	}
-	if running {
-		os.Remove(socketPath(display))
+	if err := removeXContainer(engine, opts.name); err != nil {
+		return err
 	}
 
 	fmt.Fprintln(os.Stderr, "ebitenmcp: X server stopped")
+	return nil
+}
+
+// removeXContainer snapshots the exact socket inode before stopping the
+// container, then removes it only if it is still the same file afterwards.
+// Xwayland's /tmp is private, so its lock is normally not on the host, but the
+// same cleanup covers it if a container configuration shares more of /tmp.
+func removeXContainer(engine, name string) error {
+	display, found := containerDisplay(engine, name)
+	var artifacts displayArtifacts
+	if found {
+		artifacts, _ = captureDisplayArtifacts(display)
+	}
+
+	out, err := engineCombined(engine, "rm", "-f", name)
+	if err != nil {
+		return fmt.Errorf("stopping the X server: %s", strings.TrimSpace(string(out)))
+	}
+	if err := artifacts.remove(); err != nil {
+		return fmt.Errorf("cleaning up the X server: %w", err)
+	}
 	return nil
 }
 
@@ -406,7 +463,7 @@ func xStatus(opts xOptions) error {
 	}
 
 	fmt.Printf("display  %s\nsocket   %s\nrenderer %s\nimage    %s\n",
-		display, socketPath(display), renderer(display), imageTag())
+		display, socketPath(display), rendererForMode(display, hasGPU(engine, opts.name)), imageTag())
 	return nil
 }
 
@@ -414,22 +471,24 @@ func socketPath(display string) string {
 	return filepath.Join(x11SocketDir, "X"+strings.TrimPrefix(display, ":"))
 }
 
-// takenDisplays lists the display numbers that already have a socket, which is
-// what both this process and the container use to stay out of each other's way.
-func takenDisplays() map[int]bool {
-	taken := map[int]bool{}
+func lockPath(display string) string {
+	return filepath.Join(filepath.Dir(x11SocketDir), ".X"+strings.TrimPrefix(display, ":")+"-lock")
+}
 
-	entries, err := os.ReadDir(x11SocketDir)
-	if err != nil {
-		return taken
+func displayNumber(display string) (int, error) {
+	if !strings.HasPrefix(display, ":") || strings.Contains(display, ".") {
+		return 0, fmt.Errorf("expected : followed by a display number")
 	}
+	n, err := strconv.Atoi(strings.TrimPrefix(display, ":"))
+	if err != nil || n < 0 || display != fmt.Sprintf(":%d", n) {
+		return 0, fmt.Errorf("expected : followed by a display number")
+	}
+	return n, nil
+}
 
-	for _, entry := range entries {
-		if n, err := strconv.Atoi(strings.TrimPrefix(entry.Name(), "X")); err == nil {
-			taken[n] = true
-		}
-	}
-	return taken
+func displayPathExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil || !os.IsNotExist(err)
 }
 
 func tail(s string, lines int) string {

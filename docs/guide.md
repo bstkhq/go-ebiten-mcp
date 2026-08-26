@@ -110,6 +110,9 @@ With `DISPLAY` already set it starts nothing — the desktop case, and the case 
 a build container run with `--env=DISPLAY`. Without one it brings up a display
 and says which renderer it ended up with, because a run that quietly fell back
 to software still passes its tests while every timing it reports is a lie.
+When `--gpu` was asked for, that check is fail-closed: an unknown renderer or a
+software rasteriser stops the run before the command starts. `glxinfo` from
+`mesa-utils` is therefore part of a GPU setup, not an optional diagnostic.
 
 For a shell or a CI job `go install` is the right shape — you want the binary on
 `$PATH`. For an MCP client it is not: use the `go run …@latest` form, which does
@@ -155,6 +158,16 @@ control (`-ac`), because the client comes from outside the container and shares
 no cookie; anyone on the machine can connect to it. And a container has its own
 network namespace, so its abstract X socket cannot collide with the host's —
 which is exactly why it must not be run with `--network host`.
+
+Rootless Podman also has to preserve the caller's supplementary `render` group.
+The launcher passes `--group-add keep-groups` for that reason. Podman implements
+that option with `crun`, so the GPU path selects that runtime explicitly. A host
+without `crun` errors instead of exposing the render node by name while leaving
+it unreadable and falling back to llvmpipe.
+
+On an NVIDIA render node, the launcher also selects NVIDIA's GLVND GLX vendor
+for the probe and the game. Some Xwayland installations otherwise run the
+compositor on NVIDIA but silently give GLX clients llvmpipe.
 
 For scale: a real 1080x1920 game runs at 3.8 ticks per second in software and
 59.9 on a Radeon through the same path, drawing pixel-identical frames.

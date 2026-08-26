@@ -122,6 +122,10 @@ ebitenmcp run --gpu ./mygame     # rendering on the GPU
 With `DISPLAY` already set it changes nothing. Without one it starts a display,
 in a container if the machine has no X — see the [guide](docs/guide.md).
 
+`--gpu` is checked, not assumed: it refuses to start the command when `glxinfo`
+cannot identify the renderer or reports llvmpipe/another software rasteriser.
+That keeps a green test run from being mistaken for a valid GPU benchmark.
+
 On macOS and Windows there is nothing to arrange: a game opens its own window,
 so `run` only switches the server on and starts it.
 

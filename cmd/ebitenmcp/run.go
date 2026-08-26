@@ -3,15 +3,16 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -102,6 +103,12 @@ func runCommand(args []string) error {
 	}
 
 	env := os.Environ()
+	if opts.gpu {
+		env = gpuEnvironment(env)
+	}
+	display := os.Getenv("DISPLAY")
+	where := ""
+	var stopDisplay func()
 
 	// Only start something if the platform wants one and there is nothing to
 	// use. Running this on a desktop should change nothing about how the game
@@ -109,23 +116,41 @@ func runCommand(args []string) error {
 	// comes from the operating system, DISPLAY is never set, and looking at it
 	// would send `run` hunting for an X server to answer a question nobody
 	// asked. It used to, and the game never started.
-	if usesDisplay && os.Getenv("DISPLAY") == "" {
-		display, where, stop, err := startDisplay(opts)
+	if usesDisplay && display == "" {
+		display, where, stopDisplay, err = startDisplay(opts)
 		if err != nil {
 			return err
 		}
 		if !opts.keep {
-			defer stop()
+			defer stopDisplay()
 		}
 
-		found := renderer(display)
-		fmt.Fprintf(os.Stderr, "ebitenmcp: %s on %s, rendering with %s\n", where, display, found)
+	}
+	if usesDisplay && display != "" {
+		env = setEnvironment(env, "DISPLAY", display)
+	}
 
-		env = append(env, "DISPLAY="+display)
+	// A requested GPU run must be one, rather than a successful software run
+	// with meaningless timings. Existing displays are checked too: --gpu is a
+	// promise about the renderer, not only about how a new display was started.
+	if usesDisplay && (where != "" || opts.gpu) {
+		found := rendererForMode(display, opts.gpu)
+		if where == "" {
+			where = "using the existing X display"
+		}
+		fmt.Fprintf(os.Stderr, "ebitenmcp: %s on %s, rendering with %s\n", where, display, found)
+		if opts.gpu {
+			if err := requireHardwareRenderer(found); err != nil {
+				if opts.keep && stopDisplay != nil {
+					stopDisplay()
+				}
+				return err
+			}
+		}
 
 		// Passed on so that anything downstream can record which rasteriser it
 		// was looking at. A golden image is only comparable against one.
-		env = append(env, rendererEnv+"="+found)
+		env = setEnvironment(env, rendererEnv, found)
 	}
 
 	// The address is what turns the server on, so `run` sets it. Anything
@@ -180,6 +205,21 @@ const (
 const rendererTimeout = 10 * time.Second
 
 func renderer(display string) string {
+	return rendererWithEnvironment(display, os.Environ())
+}
+
+func rendererForGPU(display string) string {
+	return rendererWithEnvironment(display, gpuEnvironment(os.Environ()))
+}
+
+func rendererForMode(display string, gpu bool) string {
+	if gpu {
+		return rendererForGPU(display)
+	}
+	return renderer(display)
+}
+
+func rendererWithEnvironment(display string, env []string) string {
 	path, err := exec.LookPath("glxinfo")
 	if err != nil {
 		return "unknown (install mesa-utils to find out)"
@@ -189,7 +229,7 @@ func renderer(display string) string {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, path, "-B")
-	cmd.Env = append(os.Environ(), "DISPLAY="+display)
+	cmd.Env = setEnvironment(env, "DISPLAY", display)
 
 	out, err := cmd.Output()
 	if err != nil {
@@ -202,6 +242,53 @@ func renderer(display string) string {
 		}
 	}
 	return "unknown"
+}
+
+const nvidiaRenderVendor = "0x10de"
+
+func gpuEnvironment(env []string) []string {
+	vendor, err := os.ReadFile(renderNodeVendorPath)
+	if err != nil {
+		return env
+	}
+	return gpuEnvironmentForVendor(env, strings.TrimSpace(string(vendor)))
+}
+
+func gpuEnvironmentForVendor(env []string, vendor string) []string {
+	if vendor != nvidiaRenderVendor {
+		return env
+	}
+
+	// NVIDIA's GLVND client does not select its GLX implementation through
+	// Xwayland on every distribution. Without these the compositor itself uses
+	// NVIDIA while the game silently lands on llvmpipe.
+	env = setEnvironment(env, "__NV_PRIME_RENDER_OFFLOAD", "1")
+	return setEnvironment(env, "__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+}
+
+func setEnvironment(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, prefix+value)
+}
+
+func requireHardwareRenderer(found string) error {
+	lower := strings.ToLower(found)
+	if strings.HasPrefix(lower, "unknown") {
+		return fmt.Errorf("--gpu could not verify the renderer (%s); install glxinfo from mesa-utils", found)
+	}
+
+	for _, software := range []string{"llvmpipe", "softpipe", "swrast", "software rasterizer"} {
+		if strings.Contains(lower, software) {
+			return fmt.Errorf("--gpu reached the software renderer %q; refusing to report GPU results", found)
+		}
+	}
+	return nil
 }
 
 // startDisplay brings up a display and returns it, a description of where it
@@ -259,31 +346,64 @@ func installHint(name string) string {
 }
 
 func startXvfb(opts runOptions) (string, func(), error) {
-	display := opts.display
-	if display == "" {
-		var err error
-		if display, err = freeDisplay(); err != nil {
-			return "", nil, err
-		}
-	}
-
 	width, height, err := splitScreen(opts.screen)
 	if err != nil {
 		return "", nil, err
+	}
+
+	display := opts.display
+	var releaseReservation func()
+	if display == "" {
+		if display, releaseReservation, err = reserveFreeDisplay(); err != nil {
+			return "", nil, err
+		}
+	} else {
+		number, err := displayNumber(display)
+		if err != nil {
+			return "", nil, fmt.Errorf("invalid display %q: %w", display, err)
+		}
+		var reserved bool
+		releaseReservation, reserved, err = reserveDisplayNumber(number)
+		if err != nil {
+			return "", nil, err
+		}
+		if !reserved {
+			return "", nil, fmt.Errorf("display %s is being started by another ebitenmcp process", display)
+		}
+		if displayPathExists(socketPath(display)) || displayPathExists(lockPath(display)) {
+			releaseReservation()
+			return "", nil, fmt.Errorf("display %s is already occupied", display)
+		}
 	}
 
 	cmd := exec.Command("Xvfb", display,
 		"-screen", "0", fmt.Sprintf("%dx%dx24", width, height),
 		"-nolisten", "tcp")
 	cmd.Stderr = os.Stderr
+	newProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
+		releaseReservation()
 		return "", nil, fmt.Errorf("starting Xvfb: %w", err)
 	}
 
-	stop := func() { cmd.Process.Kill(); cmd.Wait() }
+	var artifacts displayArtifacts
+	stopProcess := displayProcessStopper(cmd, &artifacts, "")
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			stopProcess()
+			releaseReservation()
+		})
+	}
 
 	if err := waitForDisplay(display); err != nil {
+		artifacts, _ = captureDisplayArtifacts(display)
+		stop()
+		return "", nil, err
+	}
+	artifacts, err = captureDisplayArtifacts(display)
+	if err != nil {
 		stop()
 		return "", nil, err
 	}
@@ -300,38 +420,57 @@ var westonDisplay = regexp.MustCompile(`xserver listening on display (:\d+)`)
 // and Xwayland on top of that falls back to llvmpipe, which looks like it
 // worked and is the exact thing the GPU path exists to avoid.
 func startWeston(opts runOptions) (string, func(), error) {
-	// Weston needs XDG_RUNTIME_DIR to exist, not merely to be named. A
-	// container image that declares the variable without creating the directory
-	// is common, and weston's complaint about it — "failed to add socket: No
-	// such file or directory" — points nowhere near the cause.
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		dir = filepath.Join(os.TempDir(), fmt.Sprintf("ebitenmcp-%d", os.Getpid()))
-		os.Setenv("XDG_RUNTIME_DIR", dir)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", nil, fmt.Errorf("creating XDG_RUNTIME_DIR %s: %w", dir, err)
-	}
-	os.Chmod(dir, 0o700)
-
 	width, height, err := splitScreen(opts.screen)
 	if err != nil {
 		return "", nil, err
 	}
 
+	// Weston needs XDG_RUNTIME_DIR to exist, not merely to be named. A
+	// container image that declares the variable without creating the directory
+	// is common, and weston's complaint about it — "failed to add socket: No
+	// such file or directory" — points nowhere near the cause.
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	ownedDir := ""
+	if dir == "" {
+		dir, err = os.MkdirTemp("", "ebitenmcp-runtime-")
+		if err != nil {
+			return "", nil, fmt.Errorf("creating XDG_RUNTIME_DIR: %w", err)
+		}
+		ownedDir = dir
+	} else {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", nil, fmt.Errorf("creating XDG_RUNTIME_DIR %s: %w", dir, err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return "", nil, fmt.Errorf("securing XDG_RUNTIME_DIR %s: %w", dir, err)
+		}
+	}
+
 	cmd := exec.Command("weston",
 		"--backend=headless", "--renderer=gl", "--xwayland",
 		fmt.Sprintf("--width=%d", width), fmt.Sprintf("--height=%d", height))
+	cmd.Env = gpuEnvironment(os.Environ())
+	if ownedDir != "" {
+		cmd.Env = setEnvironment(cmd.Env, "XDG_RUNTIME_DIR", dir)
+	}
+	newProcessGroup(cmd)
 
 	logs, err := cmd.StderrPipe()
 	if err != nil {
+		if ownedDir != "" {
+			os.RemoveAll(ownedDir)
+		}
 		return "", nil, err
 	}
 
 	if err := cmd.Start(); err != nil {
+		if ownedDir != "" {
+			os.RemoveAll(ownedDir)
+		}
 		return "", nil, fmt.Errorf("starting weston: %w", err)
 	}
-	stop := func() { cmd.Process.Kill(); cmd.Wait() }
+	var artifacts displayArtifacts
+	stop := displayProcessStopper(cmd, &artifacts, ownedDir)
 
 	// Weston picks the display number itself and only announces it in its log,
 	// so read it from there rather than guessing.
@@ -342,10 +481,119 @@ func startWeston(opts runOptions) (string, func(), error) {
 	}
 
 	if err := waitForDisplay(display); err != nil {
+		artifacts, _ = captureDisplayArtifacts(display)
+		stop()
+		return "", nil, err
+	}
+	artifacts, err = captureDisplayArtifacts(display)
+	if err != nil {
 		stop()
 		return "", nil, err
 	}
 	return display, stop, nil
+}
+
+// A display server must get SIGTERM if it is to unlink its own socket and lock.
+// The fallback cleanup remembers the inodes it made: if another server reuses a
+// name between shutdown and cleanup, its new files are left alone.
+const displayStopGrace = 2 * time.Second
+
+type displayArtifact struct {
+	path string
+	info os.FileInfo
+}
+
+type displayArtifacts []displayArtifact
+
+func captureDisplayArtifacts(display string) (displayArtifacts, error) {
+	if _, err := displayNumber(display); err != nil {
+		return nil, err
+	}
+
+	var artifacts displayArtifacts
+	for _, path := range []string{socketPath(display), lockPath(display)} {
+		info, err := os.Lstat(path)
+		if err == nil {
+			artifacts = append(artifacts, displayArtifact{path: path, info: info})
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("inspecting display artifact %s: %w", path, err)
+		}
+	}
+	return artifacts, nil
+}
+
+func (artifacts displayArtifacts) remove() error {
+	var errs []error
+	for _, artifact := range artifacts {
+		current, err := os.Lstat(artifact.path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("inspecting %s during cleanup: %w", artifact.path, err))
+			continue
+		}
+		// Some filesystems can recycle an inode immediately. The timestamp
+		// metadata exposed as ModTime distinguishes that replacement in the case
+		// os.SameFile alone cannot.
+		if !os.SameFile(artifact.info, current) ||
+			!artifact.info.ModTime().Equal(current.ModTime()) {
+			continue
+		}
+		if err := os.Remove(artifact.path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("removing %s: %w", artifact.path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func displayProcessStopper(cmd *exec.Cmd, artifacts *displayArtifacts, runtimeDir string) func() {
+	var once sync.Once
+
+	return func() {
+		once.Do(func() {
+			terminateGroup(cmd)
+
+			done := make(chan struct{})
+			go func() {
+				_ = cmd.Wait()
+				close(done)
+			}()
+
+			stopped := waitForChannel(done, displayStopGrace)
+			if !stopped {
+				killGroup(cmd)
+				stopped = waitForChannel(done, displayStopGrace)
+			}
+			if !stopped {
+				fmt.Fprintln(os.Stderr, "ebitenmcp: display process did not stop; preserving its files")
+				return
+			}
+
+			if err := artifacts.remove(); err != nil {
+				fmt.Fprintf(os.Stderr, "ebitenmcp: cleaning up the display: %v\n", err)
+			}
+			if runtimeDir != "" {
+				if err := os.RemoveAll(runtimeDir); err != nil {
+					fmt.Fprintf(os.Stderr, "ebitenmcp: removing %s: %v\n", runtimeDir, err)
+				}
+			}
+		})
+	}
+}
+
+func waitForChannel(done <-chan struct{}, grace time.Duration) bool {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func readDisplay(logs io.Reader) (string, error) {
@@ -374,7 +622,7 @@ func readDisplay(logs io.Reader) (string, error) {
 }
 
 func waitForDisplay(display string) error {
-	socket := filepath.Join("/tmp/.X11-unix", "X"+strings.TrimPrefix(display, ":"))
+	socket := socketPath(display)
 
 	for i := 0; i < 150; i++ {
 		if _, err := os.Stat(socket); err == nil {
@@ -385,22 +633,28 @@ func waitForDisplay(display string) error {
 	return fmt.Errorf("display %s never came up", display)
 }
 
-// freeDisplay picks a number nothing is using, by socket and by lock file. The
-// two disagree often enough to be worth checking both: a crashed server leaves a
-// lock behind, and a server in another container leaves only a socket.
-func freeDisplay() (string, error) {
-	taken := takenDisplays()
-
+// reserveFreeDisplay picks and reserves a number nothing is using, by socket
+// and by lock file. The two disagree often enough to be worth checking both: a
+// crashed server leaves a lock behind, and a server in another container leaves
+// only a socket.
+func reserveFreeDisplay() (string, func(), error) {
 	for n := 99; n > 50; n-- {
-		if taken[n] {
+		release, reserved, err := reserveDisplayNumber(n)
+		if err != nil {
+			return "", nil, err
+		}
+		if !reserved {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(os.TempDir(), fmt.Sprintf(".X%d-lock", n))); err == nil {
+
+		display := fmt.Sprintf(":%d", n)
+		if displayPathExists(socketPath(display)) || displayPathExists(lockPath(display)) {
+			release()
 			continue
 		}
-		return fmt.Sprintf(":%d", n), nil
+		return display, release, nil
 	}
-	return "", fmt.Errorf("no free display number between :51 and :99")
+	return "", nil, fmt.Errorf("no free display number between :51 and :99")
 }
 
 // splitScreen parses a screen size into two numbers.
