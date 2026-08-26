@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -452,10 +453,19 @@ func (c *control) xStart(ctx context.Context, _ *mcpsdk.CallToolRequest, in xSta
 	if err != nil {
 		return nil, nil, err
 	}
+	found := rendererForMode(display, opts.gpu)
+	if opts.gpu {
+		if err := requireHardwareRenderer(found); err != nil {
+			if started {
+				err = errors.Join(err, stopXContainer(opts))
+			}
+			return nil, nil, err
+		}
+	}
 
 	return nil, map[string]any{
 		"display":  display,
-		"renderer": renderer(display),
+		"renderer": found,
 		"started":  started,
 	}, nil
 }
@@ -473,7 +483,8 @@ func (c *control) xStatus(_ context.Context, _ *mcpsdk.CallToolRequest, _ emptyI
 		return nil, nil, err
 	}
 
-	display, ok := runningDisplay(engine, newXOptions())
+	opts := newXOptions()
+	display, ok := runningDisplay(engine, opts)
 	if !ok {
 		return nil, map[string]any{"running": false}, nil
 	}
@@ -482,6 +493,6 @@ func (c *control) xStatus(_ context.Context, _ *mcpsdk.CallToolRequest, _ emptyI
 		"running":  true,
 		"display":  display,
 		"socket":   socketPath(display),
-		"renderer": renderer(display),
+		"renderer": rendererForMode(display, hasGPU(engine, opts.name)),
 	}, nil
 }
