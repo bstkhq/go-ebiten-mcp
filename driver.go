@@ -56,27 +56,42 @@ func RunTests(m *testing.M, factory func() ebiten.Game, opts ...Option) {
 	// as the machine allows and a hundred-tick test takes milliseconds.
 	ebiten.SetVsyncEnabled(false)
 
-	code := make(chan int, 1)
 	go func() {
 		result := m.Run()
-		rt.Terminate()
-		code <- result
+
+		// Close before exiting, and before anything else is printed: it puts the
+		// descriptors back, so what follows goes straight to the terminal instead
+		// of through a goroutine that os.Exit will not wait for — which is how the
+		// failure message and the last of the test output used to be lost.
+		rt.Close()
+
+		// Exit from here rather than letting the game loop unwind.
+		//
+		// Terminating the loop made RunGame return, and returning from RunGame
+		// tears the window and the GL context down. Under a software renderer on
+		// a small machine that teardown would sometimes die with a segmentation
+		// fault, after the tests had passed and after the Go runtime was done, so
+		// nothing printed a stack and a green package reported FAIL. There is
+		// nothing to be gained by dismantling a process that is about to stop
+		// existing: os.Exit is exit_group, the threads stop where they are, and
+		// the kernel takes the memory and the descriptors back.
+		os.Exit(result)
 	}()
 
-	err := ebiten.RunGame(wrapped)
-
-	// Before either exit, and before anything else is printed. Close puts the
-	// descriptors back, so what follows goes straight to the terminal instead of
-	// through a goroutine that os.Exit will not wait for — which is how the
-	// failure message and the last of the test output used to be lost.
-	rt.Close()
-
-	if err != nil {
+	if err := ebiten.RunGame(wrapped); err != nil {
+		rt.Close()
 		fmt.Fprintln(os.Stderr, "ebitenmcp: the game loop failed:", err)
 		os.Exit(1)
 	}
 
-	os.Exit(<-code)
+	// RunGame returned on its own, without the tests asking it to: the game
+	// stopped itself. Put the descriptors back now rather than when the tests
+	// finish, so that a test left waiting for a game that is no longer running
+	// still prints its timeout. Close is idempotent.
+	rt.Close()
+
+	// Wait for the tests to notice and exit above.
+	select {}
 }
 
 // Driver drives the game from a test.
