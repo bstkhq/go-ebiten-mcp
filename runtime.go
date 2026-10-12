@@ -373,8 +373,12 @@ func (r *Runtime) Paused() (paused bool, steps int) {
 // ebiten.Termination.
 //
 // It deliberately ignores pause, steps and a recorded crash: a game held or
-// wedged in any of those states still has to be able to shut down, and it is
-// the only way out for a test binary that owns the process's single loop.
+// wedged in any of those states still has to be able to shut down.
+//
+// A test binary does not use it. It owns the process and exits from where its
+// tests finish, which also means a game whose Update never returns cannot hold
+// the binary open: this asks the loop to stop and a loop that never looks will
+// never hear it.
 func (r *Runtime) Terminate() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
