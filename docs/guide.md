@@ -163,11 +163,11 @@ master, and `--renderer=pixman` needs no GPU at all. With `--gpu` the render
 node is needed on *both* sides — the compositor uses it, and so does the game,
 because with direct rendering it is the client that draws.
 
-Two things worth knowing before they surprise you. The display has no access
-control (`-ac`), because the client comes from outside the container and shares
-no cookie; anyone on the machine can connect to it. And a container has its own
-network namespace, so its abstract X socket cannot collide with the host's —
-which is exactly why it must not be run with `--network host`.
+The container display has no access control (`-ac`), because the client comes
+from outside the container and shares no cookie; anyone on the machine can
+connect to it. Host networking makes its abstract X socket reachable by those
+clients. Display reservations and checks for existing listeners prevent
+concurrent runs from choosing the same number in that shared namespace.
 
 Rootless Podman also has to preserve the caller's supplementary `render` group.
 The launcher passes `--group-add keep-groups` for that reason. Podman implements
