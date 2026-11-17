@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,7 @@ import (
 // there is no display and often no way to install one.
 //
 // The game never runs in here. It runs wherever you build it and connects over
-// the socket in /tmp/.X11-unix, so nothing about your binary's libraries is
+// abstract Unix socket, so nothing about your binary's libraries is
 // this container's business.
 //
 //	ebitenmcp x start [--gpu]    # prints the DISPLAY to use
@@ -81,9 +82,8 @@ func engineCombined(engine string, args ...string) ([]byte, error) {
 // never run this, and it is downloading an X server.
 const buildTimeout = 15 * time.Minute
 
-// x11SocketDir is shared between the container and everything that draws. On
-// Linux it is world-writable and sticky, which is what makes this work without
-// privileges.
+// X servers hardcode this path. Linux also uses it as the name of an abstract
+// socket, without accessing the filesystem directory.
 const x11SocketDir = "/tmp/.X11-unix"
 
 // renderNode is the only piece of the GPU the container is given. A render node
@@ -95,11 +95,12 @@ const (
 )
 
 type xOptions struct {
-	gpu    bool
-	screen string
-	image  string
-	engine string
-	name   string
+	gpu     bool
+	screen  string
+	image   string
+	engine  string
+	name    string
+	display string
 }
 
 func newXOptions() xOptions {
@@ -264,8 +265,7 @@ func startXContainer(ctx context.Context, opts xOptions) (display string, starte
 		}
 	}
 
-	// A container left behind by an earlier run whose display is gone. Its
-	// filesystem socket is outside the container and must go with it.
+	// Remove a container left behind by an earlier run whose display is gone.
 	_ = removeXContainer(engine, opts.name)
 
 	image, err := ensureImage(ctx, engine, opts)
@@ -278,14 +278,25 @@ func startXContainer(ctx context.Context, opts xOptions) (display string, starte
 		return "", false, err
 	}
 
+	display, release, err := reserveRunDisplay(opts.display)
+	if err != nil {
+		return "", false, err
+	}
+	defer release()
+	opts.display = display
+
 	var run []string
 	if opts.gpu {
 		run = append(run, gpuContainerGlobalArgs(engine)...)
 	}
 	run = append(run,
 		"run", "-d", "--name", opts.name,
-		"-v", x11SocketDir+":"+x11SocketDir,
+		"--network", "host",
 	)
+	if runtime.GOOS != "linux" {
+		// Non-Linux X11 clients need the filesystem transport.
+		run = append(run, "-v", x11SocketDir+":"+x11SocketDir)
+	}
 	if opts.gpu {
 		run = append(run, gpuContainerArgs(engine)...)
 	}
@@ -324,30 +335,31 @@ func gpuContainerGlobalArgs(engine string) []string {
 	return nil
 }
 
-// westonCommand is the whole of the logic that runs inside the container, and
-// it is composed here rather than baked into the image so that the image stays
-// a set of packages.
-//
-// The lock files are the non-obvious part. Weston picks its X display number
-// itself, and decides a number is free by looking for /tmp/.X<n>-lock in its own
-// filesystem — where the host's locks are not, because only the socket directory
-// is shared. Left alone it therefore tries :0, finds the host's socket already
-// bound, and gives up rather than trying :1. Creating a lock for every socket it
-// can see makes it skip the taken numbers.
+// westonCommand keeps Wayland state private and starts Xwayland itself so
+// Weston cannot bind filesystem X sockets or select the desktop's X0. All
+// interpolated values are validated numbers or internally chosen constants.
 func westonCommand(opts xOptions, width, height int) string {
 	renderer := "pixman"
 	if opts.gpu {
 		renderer = "gl"
 	}
-
-	return fmt.Sprintf(`set -e
-mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-for socket in %[1]s/X*; do
-    [ -e "$socket" ] || continue
-    touch "/tmp/.X${socket##*/X}-lock"
+	return fmt.Sprintf(`set -eu
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+export WAYLAND_DISPLAY=ebitenmcp-wayland
+weston --no-config --backend=headless --renderer=%[1]s --socket="$WAYLAND_DISPLAY" --width=%[2]d --height=%[3]d &
+weston_pid=$!
+trap 'kill "$weston_pid" 2>/dev/null || true' EXIT
+attempt=0
+while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do
+    kill -0 "$weston_pid"
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 150 ] || exit 1
+    sleep 0.1
 done
-exec weston --backend=headless --renderer=%[2]s --xwayland --width=%[3]d --height=%[4]d`,
-		x11SocketDir, renderer, width, height)
+echo 'xserver listening on display %[4]s' >&2
+exec Xwayland %[4]s %[5]s -ac -geometry %[2]dx%[3]d`,
+		renderer, width, height, opts.display, strings.Join(xListenerArgs(), " "))
 }
 
 func waitForXwayland(engine, name string) (string, error) {
@@ -383,7 +395,7 @@ func runningDisplay(engine string, opts xOptions) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if _, err := os.Stat(socketPath(display)); err != nil {
+	if !displayListening(display) {
 		return "", false
 	}
 	return display, true
@@ -429,23 +441,12 @@ func stopXContainer(opts xOptions) error {
 	return nil
 }
 
-// removeXContainer snapshots the exact socket inode before stopping the
-// container, then removes it only if it is still the same file afterwards.
-// Xwayland's /tmp is private, so its lock is normally not on the host, but the
-// same cleanup covers it if a container configuration shares more of /tmp.
+// Container sockets and lock files live in its own filesystem. Never unlink
+// a host artifact merely because a container log mentions its display number.
 func removeXContainer(engine, name string) error {
-	display, found := containerDisplay(engine, name)
-	var artifacts displayArtifacts
-	if found {
-		artifacts, _ = captureDisplayArtifacts(display)
-	}
-
 	out, err := engineCombined(engine, "rm", "-f", name)
 	if err != nil {
 		return fmt.Errorf("stopping the X server: %s", strings.TrimSpace(string(out)))
-	}
-	if err := artifacts.remove(); err != nil {
-		return fmt.Errorf("cleaning up the X server: %w", err)
 	}
 	return nil
 }

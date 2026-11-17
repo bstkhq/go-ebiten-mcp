@@ -1,15 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,7 +53,7 @@ func setXMode(mode *string, v string) error {
 	}
 }
 
-// defaultScreen is the size of the display started when there is none. Big
+// defaultScreen is the size of the private display. Big
 // enough for a game to lay out normally, small enough to read back quickly.
 const defaultScreen = "1280x720"
 
@@ -70,8 +68,7 @@ const defaultScreen = "1280x720"
 //	ebitenmcp run --gpu ./mygame      # the same, rendering on the GPU
 //	ebitenmcp run go test ./...       # the package's tests, headless
 //
-// A display that already exists is used as it is, so this is a no-op on a
-// desktop and does the work on a server or in CI.
+// Each run owns its display, even when DISPLAY already names a desktop.
 
 type runOptions struct {
 	gpu     bool
@@ -110,34 +107,26 @@ func runCommand(args []string) error {
 	where := ""
 	var stopDisplay func()
 
-	// Only start something if the platform wants one and there is nothing to
-	// use. Running this on a desktop should change nothing about how the game
-	// looks — and on macOS or Windows there is nothing to change: the window
-	// comes from the operating system, DISPLAY is never set, and looking at it
-	// would send `run` hunting for an X server to answer a question nobody
-	// asked. It used to, and the game never started.
-	if usesDisplay && display == "" {
+	// Never borrow the desktop (including WSLg's X0). Native-window platforms
+	// still need no X server.
+	if usesDisplay {
 		display, where, stopDisplay, err = startDisplay(opts)
 		if err != nil {
-			return err
+			return fmt.Errorf("starting a private X display: %w; on WSL, leave WSLg's read-only /tmp/.X11-unix and X0 unchanged; Linux X servers must support abstract sockets (-nolisten unix)", err)
 		}
 		if !opts.keep {
 			defer stopDisplay()
 		}
-
 	}
+
 	if usesDisplay && display != "" {
 		env = setEnvironment(env, "DISPLAY", display)
 	}
 
 	// A requested GPU run must be one, rather than a successful software run
-	// with meaningless timings. Existing displays are checked too: --gpu is a
-	// promise about the renderer, not only about how a new display was started.
-	if usesDisplay && (where != "" || opts.gpu) {
+	// with meaningless timings.
+	if usesDisplay {
 		found := rendererForMode(display, opts.gpu)
-		if where == "" {
-			where = "using the existing X display"
-		}
 		fmt.Fprintf(os.Stderr, "ebitenmcp: %s on %s, rendering with %s\n", where, display, found)
 		if opts.gpu {
 			if err := requireHardwareRenderer(found); err != nil {
@@ -310,7 +299,8 @@ func startDisplay(opts runOptions) (string, string, func(), error) {
 	useContainer := opts.mode == "container" || (opts.mode == "auto" && !haveLocal)
 	if useContainer {
 		x := newXOptions()
-		x.gpu, x.screen = opts.gpu, opts.screen
+		x.gpu, x.screen, x.display = opts.gpu, opts.screen, opts.display
+		x.name = "ebitenmcp-run-" + strings.ToLower(rand.Text())
 
 		display, started, err := startXContainer(context.Background(), x)
 		if err != nil {
@@ -318,8 +308,7 @@ func startDisplay(opts runOptions) (string, string, func(), error) {
 		}
 
 		if !started {
-			// Somebody else's, and theirs to stop.
-			return display, "reusing the X server in a container", func() {}, nil
+			return "", "", nil, fmt.Errorf("private container name %s is already in use", x.name)
 		}
 		return display, "started an X server in a container", func() { stopXContainer(x) }, nil
 	}
@@ -351,34 +340,14 @@ func startXvfb(opts runOptions) (string, func(), error) {
 		return "", nil, err
 	}
 
-	display := opts.display
-	var releaseReservation func()
-	if display == "" {
-		if display, releaseReservation, err = reserveFreeDisplay(); err != nil {
-			return "", nil, err
-		}
-	} else {
-		number, err := displayNumber(display)
-		if err != nil {
-			return "", nil, fmt.Errorf("invalid display %q: %w", display, err)
-		}
-		var reserved bool
-		releaseReservation, reserved, err = reserveDisplayNumber(number)
-		if err != nil {
-			return "", nil, err
-		}
-		if !reserved {
-			return "", nil, fmt.Errorf("display %s is being started by another ebitenmcp process", display)
-		}
-		if displayPathExists(socketPath(display)) || displayPathExists(lockPath(display)) {
-			releaseReservation()
-			return "", nil, fmt.Errorf("display %s is already occupied", display)
-		}
+	display, releaseReservation, err := reserveRunDisplay(opts.display)
+	if err != nil {
+		return "", nil, err
 	}
 
-	cmd := exec.Command("Xvfb", display,
-		"-screen", "0", fmt.Sprintf("%dx%dx24", width, height),
-		"-nolisten", "tcp")
+	args := []string{display, "-screen", "0", fmt.Sprintf("%dx%dx24", width, height)}
+	args = append(args, xListenerArgs()...)
+	cmd := exec.Command("Xvfb", args...)
 	cmd.Stderr = os.Stderr
 	newProcessGroup(cmd)
 
@@ -410,76 +379,36 @@ func startXvfb(opts runOptions) (string, func(), error) {
 	return display, stop, nil
 }
 
-var westonDisplay = regexp.MustCompile(`xserver listening on display (:\d+)`)
-
-// startWeston brings up a headless compositor with Xwayland in front of it,
-// which is the only unprivileged way to get hardware rendering without a
-// screen.
-//
-// --renderer=gl is not optional. Weston's headless backend defaults to software
-// and Xwayland on top of that falls back to llvmpipe, which looks like it
-// worked and is the exact thing the GPU path exists to avoid.
+// startWeston owns a compositor and a standalone Xwayland. Letting Weston
+// launch Xwayland would let it create filesystem listeners and choose X0.
 func startWeston(opts runOptions) (string, func(), error) {
 	width, height, err := splitScreen(opts.screen)
 	if err != nil {
 		return "", nil, err
 	}
-
-	// Weston needs XDG_RUNTIME_DIR to exist, not merely to be named. A
-	// container image that declares the variable without creating the directory
-	// is common, and weston's complaint about it — "failed to add socket: No
-	// such file or directory" — points nowhere near the cause.
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	ownedDir := ""
-	if dir == "" {
-		dir, err = os.MkdirTemp("", "ebitenmcp-runtime-")
-		if err != nil {
-			return "", nil, fmt.Errorf("creating XDG_RUNTIME_DIR: %w", err)
-		}
-		ownedDir = dir
-	} else {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", nil, fmt.Errorf("creating XDG_RUNTIME_DIR %s: %w", dir, err)
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return "", nil, fmt.Errorf("securing XDG_RUNTIME_DIR %s: %w", dir, err)
-		}
-	}
-
-	cmd := exec.Command("weston",
-		"--backend=headless", "--renderer=gl", "--xwayland",
-		fmt.Sprintf("--width=%d", width), fmt.Sprintf("--height=%d", height))
-	cmd.Env = gpuEnvironment(os.Environ())
-	if ownedDir != "" {
-		cmd.Env = setEnvironment(cmd.Env, "XDG_RUNTIME_DIR", dir)
-	}
-	newProcessGroup(cmd)
-
-	logs, err := cmd.StderrPipe()
+	display, release, err := reserveRunDisplay(opts.display)
 	if err != nil {
-		if ownedDir != "" {
-			os.RemoveAll(ownedDir)
-		}
 		return "", nil, err
 	}
-
+	dir, err := os.MkdirTemp("", "ebitenmcp-runtime-")
+	if err != nil {
+		release()
+		return "", nil, fmt.Errorf("creating private XDG_RUNTIME_DIR: %w", err)
+	}
+	x := newXOptions()
+	x.gpu, x.display = opts.gpu, display
+	cmd := exec.Command("sh", "-c", westonCommand(x, width, height))
+	cmd.Env = setEnvironment(gpuEnvironment(os.Environ()), "XDG_RUNTIME_DIR", dir)
+	cmd.Stderr = os.Stderr
+	newProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
-		if ownedDir != "" {
-			os.RemoveAll(ownedDir)
-		}
-		return "", nil, fmt.Errorf("starting weston: %w", err)
+		os.RemoveAll(dir)
+		release()
+		return "", nil, fmt.Errorf("starting weston and Xwayland: %w", err)
 	}
 	var artifacts displayArtifacts
-	stop := displayProcessStopper(cmd, &artifacts, ownedDir)
-
-	// Weston picks the display number itself and only announces it in its log,
-	// so read it from there rather than guessing.
-	display, err := readDisplay(logs)
-	if err != nil {
-		stop()
-		return "", nil, err
-	}
-
+	stopProcess := displayProcessStopper(cmd, &artifacts, dir)
+	stop := func() { stopProcess(); release() }
 	if err := waitForDisplay(display); err != nil {
 		artifacts, _ = captureDisplayArtifacts(display)
 		stop()
@@ -596,41 +525,40 @@ func waitForChannel(done <-chan struct{}, grace time.Duration) bool {
 	}
 }
 
-func readDisplay(logs io.Reader) (string, error) {
-	found := make(chan string, 1)
-
-	go func() {
-		scanner := bufio.NewScanner(logs)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if m := westonDisplay.FindStringSubmatch(line); m != nil {
-				select {
-				case found <- m[1]:
-				default:
-				}
-			}
-			fmt.Fprintln(os.Stderr, "weston:", line)
-		}
-	}()
-
-	select {
-	case display := <-found:
-		return display, nil
-	case <-time.After(15 * time.Second):
-		return "", fmt.Errorf("weston never reported an X display; is xwayland installed?")
-	}
-}
-
 func waitForDisplay(display string) error {
-	socket := socketPath(display)
-
 	for i := 0; i < 150; i++ {
-		if _, err := os.Stat(socket); err == nil {
+		if displayListening(display) {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("display %s never came up", display)
+}
+
+func reserveRunDisplay(display string) (string, func(), error) {
+	if display == "" {
+		return reserveFreeDisplay()
+	}
+	number, err := displayNumber(display)
+	if err != nil || number == 0 {
+		return "", nil, fmt.Errorf("invalid private display %q: expected : followed by a positive number; X0 is reserved for the desktop", display)
+	}
+	release, reserved, err := reserveDisplayNumber(number)
+	if err != nil {
+		return "", nil, err
+	}
+	if !reserved {
+		return "", nil, fmt.Errorf("display %s is reserved by another ebitenmcp process", display)
+	}
+	if displayOccupied(display) {
+		release()
+		return "", nil, fmt.Errorf("display %s is already occupied", display)
+	}
+	return display, release, nil
+}
+
+func displayOccupied(display string) bool {
+	return displayPathExists(socketPath(display)) || displayPathExists(lockPath(display)) || displayListening(display)
 }
 
 // reserveFreeDisplay picks and reserves a number nothing is using, by socket
@@ -648,7 +576,7 @@ func reserveFreeDisplay() (string, func(), error) {
 		}
 
 		display := fmt.Sprintf(":%d", n)
-		if displayPathExists(socketPath(display)) || displayPathExists(lockPath(display)) {
+		if displayOccupied(display) {
 			release()
 			continue
 		}

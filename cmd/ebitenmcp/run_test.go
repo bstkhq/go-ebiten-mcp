@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -196,17 +197,24 @@ func TestRunArrangesNothingWherePlatformsOpenTheirOwnWindows(t *testing.T) {
 	}
 }
 
-// And where the platform does use one, nothing changes: a display already set
-// is left alone rather than replaced.
-func TestRunLeavesADisplayThatIsAlreadyThere(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the child below is a shell script")
+// Inheriting a desktop display must never make a run borrow it.
+func TestRunStartsItsOwnDisplayWhenOneIsAlreadySet(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the display server in this test is Linux Xvfb")
+	}
+	if _, err := exec.LookPath("Xvfb"); err != nil {
+		t.Skip("Xvfb is not installed")
 	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no shell here")
 	}
 
-	t.Setenv("DISPLAY", ":42")
+	desktop, stop, err := startXvfb(runOptions{screen: "64x64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	t.Setenv("DISPLAY", desktop)
 	t.Setenv(AddrEnvName, "")
 
 	restore := usesDisplay
@@ -219,8 +227,14 @@ func TestRunLeavesADisplayThatIsAlreadyThere(t *testing.T) {
 	}
 
 	got, _ := os.ReadFile(out)
-	if string(got) != ":42" {
-		t.Errorf("the game got DISPLAY=%q, want the :42 that was already set", got)
+	if string(got) == desktop || len(got) == 0 {
+		t.Errorf("the game got DISPLAY=%q, want its own display distinct from %s", got, desktop)
+	}
+	if !displayListening(desktop) {
+		t.Error("run stopped the inherited display")
+	}
+	if displayListening(string(got)) {
+		t.Error("run left its private display running")
 	}
 }
 
@@ -241,5 +255,67 @@ func TestXSaysSoWherePlatformsOpenTheirOwnWindows(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "own window") {
 		t.Errorf("it does not say what to do instead: %v", err)
+	}
+}
+
+func TestXvfbUsesOnlyTheAbstractSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("abstract Unix sockets are Linux-specific")
+	}
+	if _, err := exec.LookPath("Xvfb"); err != nil {
+		t.Skip("Xvfb is not installed")
+	}
+	display, stop, err := startXvfb(runOptions{screen: "64x64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	if displayPathExists(socketPath(display)) {
+		t.Fatal("Xvfb created a filesystem socket")
+	}
+	if !displayListening(display) {
+		t.Fatal("abstract socket is not listening")
+	}
+	if _, err := exec.LookPath("glxinfo"); err != nil {
+		t.Skip("glxinfo is not installed; abstract listener verified")
+	}
+	if got := renderer(display); strings.HasPrefix(got, "unknown") {
+		t.Fatalf("GLX client could not connect: %s", got)
+	}
+}
+
+func TestReservationRejectsAnAbstractSocketWithoutALock(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("abstract Unix sockets are Linux-specific")
+	}
+	display, release, err := reserveFreeDisplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	listener, err := net.Listen("unix", "@"+socketPath(display))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	release()
+	if got, stop, err := reserveRunDisplay(display); err == nil {
+		stop()
+		t.Fatalf("reserved occupied abstract display %s", got)
+	}
+	other, stop, err := reserveFreeDisplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if other == display {
+		t.Fatal("automatic reservation reused an abstract listener")
+	}
+}
+
+func TestPrivateDisplayRejectsX0(t *testing.T) {
+	if _, release, err := reserveRunDisplay(":0"); err == nil {
+		release()
+		t.Fatal("private runs must never take X0")
 	}
 }

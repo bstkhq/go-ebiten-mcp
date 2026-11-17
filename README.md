@@ -107,7 +107,7 @@ func TestMenuMovesOneRowPerPress(t *testing.T) {
 built game. Golden comparison has a tolerance and writes the expected image, the
 actual one and their difference on failure.
 
-## When there is no display
+## A private display for every run
 
 Ebitengine has no headless backend, so it takes a process in front:
 
@@ -119,8 +119,19 @@ ebitenmcp run ./mygame           # the game, with the server on
 ebitenmcp run --gpu ./mygame     # rendering on the GPU
 ```
 
-With `DISPLAY` already set it changes nothing. Without one it starts a display,
-in a container if the machine has no X — see the [guide](docs/guide.md).
+On X11 platforms every `run` starts its own display, even when `DISPLAY` is
+already set. It stops that display when the command exits (unless
+`--keep-display` is requested). `--x auto` prefers a local X server and uses a
+container when none is installed; `--x container` forces a private container.
+Concurrent runs reserve different display numbers; `--display :0` is rejected.
+
+On Linux, including WSL, Xvfb and Xwayland use only an abstract Unix socket
+(`-nolisten unix`, with TCP also disabled). They never create a filesystem
+socket in WSLg's read-only `/tmp/.X11-unix` or use its X0. Containers share the
+caller's network namespace (`--network host`) so host libX11/libxcb clients can
+reach the abstract socket; the host socket directory is never mounted into the
+container. No root, host mounts, or WSL configuration changes are needed.
+The X server must support abstract listeners. See the [guide](docs/guide.md).
 
 `--gpu` is checked, not assumed: it refuses to start the command when `glxinfo`
 cannot identify the renderer or reports llvmpipe/another software rasteriser.

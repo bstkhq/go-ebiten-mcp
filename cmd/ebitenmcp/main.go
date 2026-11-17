@@ -5,7 +5,7 @@
 //	ebitenmcp init             write .mcp.json and a note in CLAUDE.md
 //	ebitenmcp mcp --start ...  the stdio server an MCP client launches
 //	ebitenmcp x start [--gpu]  an X server in a container, for a machine with none
-//	ebitenmcp run ./mygame     start a display if needed, run the game with MCP on
+//	ebitenmcp run ./mygame     start a private display, run the game with MCP on
 //	ebitenmcp find             the games running on this machine
 //
 // And, for a person at a terminal or a CI job that wants a screenshot without
@@ -74,7 +74,7 @@ The display, when there is none:
 
 Running a game:
 
-  run [flags] <cmd>...     start a display if there is none, then run cmd with
+  run [flags] <cmd>...     start a private display, then run cmd with
                            the MCP server switched on. Works for a game binary,
                            for "go run ." and for "go test ./...".
 
