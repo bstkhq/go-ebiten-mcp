@@ -2,7 +2,7 @@
 #
 # The game does not run in here. It runs wherever you build it — your machine,
 # your own build image — and connects to this one over the socket in
-# /tmp/.X11-unix. That split is the point: a container that also compiled or ran
+# the Linux abstract Unix namespace. A container that also compiled or ran
 # the game would link it against one set of libraries and run it against
 # another, and this way there is nothing of yours in here to mismatch.
 #
@@ -22,6 +22,5 @@ RUN pacman -Sy --noconfirm --needed \
         libx11 libxkbcommon libxcursor \
     && pacman -Scc --noconfirm
 
-# Not under /tmp: that directory is shared with the host so the X socket can be
-# reached, and weston's runtime state has no business going there.
+# The compositor owns its runtime directory inside the container.
 ENV XDG_RUNTIME_DIR=/run/xdg

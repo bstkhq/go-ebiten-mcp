@@ -106,9 +106,8 @@ ebitenmcp run go test ./...
 ebitenmcp run --gpu ./mygame
 ```
 
-With `DISPLAY` already set it starts nothing — the desktop case, and the case of
-a build container run with `--env=DISPLAY`. Without one it brings up a display
-and says which renderer it ended up with, because a run that quietly fell back
+Each run starts a private display, ignoring any inherited `DISPLAY`, and says
+which renderer it ended up with, because a run that quietly fell back
 to software still passes its tests while every timing it reports is a lie.
 When `--gpu` was asked for, that check is fail-closed: an unknown renderer or a
 software rasteriser stops the run before the command starts. `glxinfo` from
@@ -132,8 +131,16 @@ in a container. The game does not go in there:
    │ + its Mesa, its  │──socket──│ + Xwayland           │
    │   libX11, its GL │   unix   │                      │
    └──────────────────┘          └──────────────────────┘
-            └──────── /tmp/.X11-unix ────────┘
+            └──── abstract Unix socket ─────┘
 ```
+
+On Linux, the container uses `--network host` to share abstract Unix sockets
+with the caller. Its filesystem, X lock files and Wayland runtime remain
+private; `/tmp/.X11-unix` is not bind-mounted. This also works with WSLg's
+read-only socket directory, without touching X0. Every `run --x container`
+uses a distinct container name and reserves a nonzero display number. Weston
+and standalone Xwayland are launched separately so Weston cannot create an X
+filesystem listener or choose the display number.
 
 That split is the point. A container that also built or ran the game would link
 it against one set of libraries and run it against another, and there would be
@@ -141,10 +148,13 @@ nothing you could do about it. This way the game is compiled and run wherever
 you already do that, and the container has one job.
 
 ```sh
-ebitenmcp x start [--gpu]    # prints the DISPLAY, and stays up between runs
+ebitenmcp x start [--gpu]    # standalone display for commands launched directly
 ebitenmcp x status
 ebitenmcp x stop
 ```
+
+`x start` manages a separate named server for manual use; `run` always starts
+its own server and never reuses that display.
 
 The image is built on demand from a Containerfile embedded in the binary, so
 there is nothing to pull and nothing to publish. Weston covers both modes:
@@ -153,11 +163,11 @@ master, and `--renderer=pixman` needs no GPU at all. With `--gpu` the render
 node is needed on *both* sides — the compositor uses it, and so does the game,
 because with direct rendering it is the client that draws.
 
-Two things worth knowing before they surprise you. The display has no access
-control (`-ac`), because the client comes from outside the container and shares
-no cookie; anyone on the machine can connect to it. And a container has its own
-network namespace, so its abstract X socket cannot collide with the host's —
-which is exactly why it must not be run with `--network host`.
+The container display has no access control (`-ac`), because the client comes
+from outside the container and shares no cookie; anyone on the machine can
+connect to it. Host networking makes its abstract X socket reachable by those
+clients. Display reservations and checks for existing listeners prevent
+concurrent runs from choosing the same number in that shared namespace.
 
 Rootless Podman also has to preserve the caller's supplementary `render` group.
 The launcher passes `--group-add keep-groups` for that reason. Podman implements
