@@ -18,9 +18,7 @@ func TestXvfbStopRemovesTheDisplayItCreated(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the display paths asserted below are Linux X11 paths")
 	}
-	if _, err := exec.LookPath("Xvfb"); err != nil {
-		t.Skip("Xvfb is not installed")
-	}
+	skipWithoutXvfb(t)
 
 	// Stay outside the range normal runs use, and reuse the same small range on
 	// every test invocation. Reservation marker files intentionally persist so
@@ -73,9 +71,7 @@ func TestConcurrentXvfbStartsReserveDifferentDisplays(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Xvfb is exercised by Linux CI")
 	}
-	if _, err := exec.LookPath("Xvfb"); err != nil {
-		t.Skip("Xvfb is not installed")
-	}
+	skipWithoutXvfb(t)
 
 	type result struct {
 		display string
@@ -202,9 +198,7 @@ func TestRunStartsItsOwnDisplayWhenOneIsAlreadySet(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the display server in this test is Linux Xvfb")
 	}
-	if _, err := exec.LookPath("Xvfb"); err != nil {
-		t.Skip("Xvfb is not installed")
-	}
+	skipWithoutXvfb(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no shell here")
 	}
@@ -262,9 +256,7 @@ func TestXvfbUsesOnlyTheAbstractSocket(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("abstract Unix sockets are Linux-specific")
 	}
-	if _, err := exec.LookPath("Xvfb"); err != nil {
-		t.Skip("Xvfb is not installed")
-	}
+	skipWithoutXvfb(t)
 	display, stop, err := startXvfb(runOptions{screen: "64x64"})
 	if err != nil {
 		t.Fatal(err)
@@ -317,5 +309,17 @@ func TestPrivateDisplayRejectsX0(t *testing.T) {
 	if _, release, err := reserveRunDisplay(":0"); err == nil {
 		release()
 		t.Fatal("private runs must never take X0")
+	}
+}
+
+// skipWithoutXvfb is for the tests of the software display itself: they start
+// Xvfb, which a host that requires the GPU has forbidden outright.
+func skipWithoutXvfb(t *testing.T) {
+	t.Helper()
+	if gpu, _ := hostGPU(false); gpu {
+		t.Skipf("%s=%s: this host starts no software display", GPUEnvName, gpuRequired)
+	}
+	if _, err := exec.LookPath("Xvfb"); err != nil {
+		t.Skip("Xvfb is not installed")
 	}
 }

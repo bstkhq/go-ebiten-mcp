@@ -6,6 +6,7 @@
 //	ebitenmcp mcp --start ...  the stdio server an MCP client launches
 //	ebitenmcp x start [--gpu]  an X server in a container, for a machine with none
 //	ebitenmcp run ./mygame     start a private display, run the game with MCP on
+//	ebitenmcp display DIR      keep one GPU display up for many commands
 //	ebitenmcp find             the games running on this machine
 //
 // And, for a person at a terminal or a CI job that wants a screenshot without
@@ -72,13 +73,22 @@ The display, when there is none:
   x stop
   x status
 
+  display [--screen WxH] DIR
+                           keep one GPU display up for many commands, with its
+                           socket in DIR so that commands in private networks
+                           reach it too. Prints unix:DIR/X<n>; set
+                           EBITENMCP_DISPLAY to that and run uses it. Stops on
+                           SIGTERM, or when the process that started it goes
+
 Running a game:
 
   run [flags] <cmd>...     start a private display, then run cmd with
                            the MCP server switched on. Works for a game binary,
                            for "go run ." and for "go test ./...".
 
-      --gpu                render on the GPU instead of in software
+      --gpu                render on the GPU instead of in software; with
+                           EBITENMCP_GPU=require the host makes every display
+                           a GPU one and never starts a software one
       --x auto             where the display comes from: local, container, auto
       --screen 1280x720    size of the virtual display
       --display :99        use this display number instead of picking one
@@ -128,6 +138,8 @@ func run(args []string) error {
 		return runCommand(args[1:])
 	case "x":
 		return xCommand(args[1:])
+	case "display":
+		return displayCommand(args[1:])
 	case "mcp":
 		return mcpCommand(args[1:], url)
 	case "init":

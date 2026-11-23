@@ -34,6 +34,16 @@ const PanicRecoveryEnv = "EBITEN_MCP_RECOVER_PANICS"
 // with, so a golden image can be tagged with it.
 const RendererEnv = "EBITENMCP_RENDERER"
 
+// GPUEnv set to "require" forbids software rendering on the whole host: every
+// display `ebitenmcp` starts is a GPU one, as though --gpu had been given, and
+// a display that would draw in software is never started.
+const GPUEnv = "EBITENMCP_GPU"
+
+// DisplayEnv names a display that `ebitenmcp display` keeps up, as
+// unix:<path>. `ebitenmcp run` uses it instead of starting one of its own and
+// leaves it running when the command ends.
+const DisplayEnv = "EBITENMCP_DISPLAY"
+
 // DiscoveryDir is where a running game announces itself, under
 // XDG_RUNTIME_DIR or the temporary directory. One file per process.
 const DiscoveryDir = "ebitenmcp"

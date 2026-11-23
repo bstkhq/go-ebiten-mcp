@@ -38,6 +38,9 @@ func parseRunFlags(args []string) (runOptions, []string, error) {
 	if err != nil {
 		return opts, nil, err
 	}
+	if opts.gpu, err = hostGPU(opts.gpu); err != nil {
+		return opts, nil, err
+	}
 	return opts, rest, nil
 }
 
@@ -108,8 +111,24 @@ func runCommand(args []string) error {
 	var stopDisplay func()
 
 	// Never borrow the desktop (including WSLg's X0). Native-window platforms
-	// still need no X server.
-	if usesDisplay {
+	// still need no X server. A display somebody keeps up for many commands is
+	// not borrowing: it was started for this, and its owner stops it.
+	shared := os.Getenv(DisplayEnvName)
+	if usesDisplay && shared != "" {
+		if opts.display != "" {
+			return fmt.Errorf("--display %s and %s=%s each name a display; give one", opts.display, DisplayEnvName, shared)
+		}
+		if display, err = sharedDisplay(shared); err != nil {
+			return err
+		}
+		// A kept display is always a GPU one, and a game on it without the GPU's
+		// environment draws on llvmpipe there all the same.
+		if !opts.gpu {
+			opts.gpu = true
+			env = gpuEnvironment(env)
+		}
+		where = "reusing the display kept up"
+	} else if usesDisplay {
 		display, where, stopDisplay, err = startDisplay(opts)
 		if err != nil {
 			return fmt.Errorf("starting a private X display: %w; on WSL, leave WSLg's read-only /tmp/.X11-unix and X0 unchanged; Linux X servers must support abstract sockets (-nolisten unix)", err)
@@ -231,28 +250,6 @@ func rendererWithEnvironment(display string, env []string) string {
 		}
 	}
 	return "unknown"
-}
-
-const nvidiaRenderVendor = "0x10de"
-
-func gpuEnvironment(env []string) []string {
-	vendor, err := os.ReadFile(renderNodeVendorPath)
-	if err != nil {
-		return env
-	}
-	return gpuEnvironmentForVendor(env, strings.TrimSpace(string(vendor)))
-}
-
-func gpuEnvironmentForVendor(env []string, vendor string) []string {
-	if vendor != nvidiaRenderVendor {
-		return env
-	}
-
-	// NVIDIA's GLVND client does not select its GLX implementation through
-	// Xwayland on every distribution. Without these the compositor itself uses
-	// NVIDIA while the game silently lands on llvmpipe.
-	env = setEnvironment(env, "__NV_PRIME_RENDER_OFFLOAD", "1")
-	return setEnvironment(env, "__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 }
 
 func setEnvironment(env []string, key, value string) []string {

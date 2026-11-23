@@ -61,6 +61,11 @@ func mcpCommand(args []string, url string) error {
 	}); err != nil {
 		return err
 	}
+	gpu, err := hostGPU(opts.gpu)
+	if err != nil {
+		return err
+	}
+	opts.gpu = gpu
 
 	c := &control{opts: opts}
 

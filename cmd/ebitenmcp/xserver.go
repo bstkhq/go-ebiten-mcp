@@ -101,6 +101,10 @@ type xOptions struct {
 	engine  string
 	name    string
 	display string
+
+	// listenFD, when not zero, is an open listening socket Xwayland serves as
+	// well as its abstract one: the file socket of `ebitenmcp display`.
+	listenFD int
 }
 
 func newXOptions() xOptions {
@@ -129,6 +133,11 @@ func xCommand(args []string) error {
 	}); err != nil {
 		return err
 	}
+	gpu, err := hostGPU(opts.gpu)
+	if err != nil {
+		return err
+	}
+	opts.gpu = gpu
 
 	switch action {
 	case "start":
@@ -347,7 +356,7 @@ func westonCommand(opts xOptions, width, height int) string {
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 export WAYLAND_DISPLAY=ebitenmcp-wayland
-weston --no-config --backend=headless --renderer=%[1]s --socket="$WAYLAND_DISPLAY" --width=%[2]d --height=%[3]d &
+weston --no-config --backend=headless --renderer=%[1]s --socket="$WAYLAND_DISPLAY" --width=%[2]d --height=%[3]d %[6]s&
 weston_pid=$!
 trap 'kill "$weston_pid" 2>/dev/null || true' EXIT
 attempt=0
@@ -359,7 +368,25 @@ while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do
 done
 echo 'xserver listening on display %[4]s' >&2
 exec Xwayland %[4]s %[5]s -ac -geometry %[2]dx%[3]d`,
-		renderer, width, height, opts.display, strings.Join(xListenerArgs(), " "))
+		renderer, width, height, opts.display, strings.Join(xListeners(opts), " "), westonCloses(opts))
+}
+
+// xListeners adds the inherited socket to the usual listeners. Only Xwayland
+// gets it: weston closes its copy, so the socket stops answering when the X
+// server does rather than when the last process holding it goes.
+func xListeners(opts xOptions) []string {
+	args := xListenerArgs()
+	if opts.listenFD != 0 {
+		args = append(args, "-listenfd", strconv.Itoa(opts.listenFD))
+	}
+	return args
+}
+
+func westonCloses(opts xOptions) string {
+	if opts.listenFD == 0 {
+		return ""
+	}
+	return strconv.Itoa(opts.listenFD) + ">&- "
 }
 
 func waitForXwayland(engine, name string) (string, error) {
