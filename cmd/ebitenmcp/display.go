@@ -30,10 +30,11 @@ import (
 // it owns it: `ebitenmcp run` with EBITENMCP_DISPLAY set uses it and never
 // stops it.
 //
-// The display is a socket file in DIR, DIR/X:<n>, as well as the abstract
-// socket every display here has. An abstract socket belongs to one network
-// namespace, so a command run in a private network of its own could not reach
-// it; a file does not care which network its client is in.
+// The display is a socket file in DIR, DIR/X:<n>, where every other display
+// here has an abstract socket; given -listenfd, Xwayland serves that file and
+// no abstract socket. An abstract socket belongs to one network namespace, so
+// a command run in a private network of its own could not reach it; a file
+// does not care which network its client is in.
 //
 // GPU only. A software display that outlives its command is exactly what the
 // host policy exists to prevent, and a per-command one is still `ebitenmcp run`.
@@ -147,8 +148,8 @@ func startSharedDisplay(ctx context.Context, dir, screen string) (string, func()
 		}
 	}
 
-	// The number is still reserved: Xwayland takes the abstract name and the
-	// lock in /tmp for it, and another display must not pick the same one.
+	// The number is still reserved: Xwayland takes the lock in /tmp for it, and
+	// another display must not pick the same one.
 	number, reserved, err := reserveRunDisplay("")
 	if err != nil {
 		unmake()

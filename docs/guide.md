@@ -205,8 +205,9 @@ A compositor per command costs about half a second and a share of VRAM each
 time. `ebitenmcp display DIR` starts weston and Xwayland once, in the
 foreground, and prints the display; whoever starts it owns it.
 
-The display is a socket file in `DIR`, passed to Xwayland with `-listenfd`,
-besides the usual abstract one. That is the reason it exists in this form: an
+The display is a socket file in `DIR`, passed to Xwayland with `-listenfd`;
+given one, Xwayland serves that file and opens no abstract socket of its own.
+That is the reason it exists in this form: an
 abstract socket belongs to one network namespace, and commands that each run
 in a private network of their own (so that their servers' ports cannot collide)
 would never reach a display started outside them. A file does not care which
