@@ -20,7 +20,7 @@ import (
 // renders with. One that is named and not there must stop the command, not
 // start a display of its own behind the owner's back.
 func TestAKeptDisplayIsUsedOnlyWhenItIsAnAbsoluteSocketThatAnswers(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "X:99")
+	path := filepath.Join(socketDir(t), "X:99")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestTheDisplaysDirectoryIsThisUsersAlone(t *testing.T) {
 // A display nobody owns is VRAM nobody frees, and one whose server died must
 // not be reported as kept up.
 func TestAKeptDisplayGoesWhenAskedWhenItsOwnerGoesAndSaysSoWhenItDies(t *testing.T) {
-	display := filepath.Join(t.TempDir(), "X:99")
+	display := filepath.Join(socketDir(t), "X:99")
 	listener, err := net.Listen("unix", display)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestAKeptDisplayDrawsOnTheGPUForAPrivateNetworkAndLeavesNothing(t *testing.
 		t.Skip("unprivileged network namespaces are not allowed here")
 	}
 
-	dir := filepath.Join(t.TempDir(), "display")
+	dir := filepath.Join(socketDir(t), "display")
 	display, stop, err := startSharedDisplay(context.Background(), dir, "64x64")
 	if err != nil {
 		t.Fatal(err)
@@ -267,7 +267,7 @@ func TestADisplayToldToStopWhileStartingLeavesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir := filepath.Join(base, "display")
+	dir := filepath.Join(socketDir(t), "display")
 	helper := exec.Command(os.Args[0], "-test.run=^TestDisplayProcessHelper$")
 	helper.Env = append(setEnvironment(os.Environ(), "PATH", slow+string(filepath.ListSeparator)+os.Getenv("PATH")),
 		helperDisplayEnv+"="+dir)
@@ -330,4 +330,16 @@ func processesWith(entry string) []int {
 		}
 	}
 	return found
+}
+
+// socketDir is a short directory for a socket: a Unix socket's path has to fit
+// sun_path, 104 bytes on macOS, and t.TempDir under macOS's TMPDIR does not.
+func socketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ebm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
 }

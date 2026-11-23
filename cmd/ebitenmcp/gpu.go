@@ -85,15 +85,18 @@ func wslGPUEnvironment(env []string, libraries string) []string {
 	}
 
 	// First, not merely present: a directory ahead of it with its own libGL or
-	// libdxcore wins the loader's search.
+	// libdxcore wins the loader's search. The list is the Linux loader's, so its
+	// separator is a colon whatever this was built for.
 	path, _ := lookupEnvironment(env, "LD_LIBRARY_PATH")
 	entries := []string{libraries}
-	for _, entry := range filepath.SplitList(path) {
-		if entry == "" || filepath.Clean(entry) != filepath.Clean(libraries) {
-			entries = append(entries, entry)
+	if path != "" {
+		for _, entry := range strings.Split(path, ":") {
+			if entry == "" || filepath.Clean(entry) != filepath.Clean(libraries) {
+				entries = append(entries, entry)
+			}
 		}
 	}
-	return setEnvironment(env, "LD_LIBRARY_PATH", strings.Join(entries, string(filepath.ListSeparator)))
+	return setEnvironment(env, "LD_LIBRARY_PATH", strings.Join(entries, ":"))
 }
 
 func lookupEnvironment(env []string, key string) (string, bool) {
