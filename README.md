@@ -136,6 +136,31 @@ The X server must support abstract listeners. See the [guide](docs/guide.md).
 `--gpu` is checked, not assumed: it refuses to start the command when `glxinfo`
 cannot identify the renderer or reports llvmpipe/another software rasteriser.
 That keeps a green test run from being mistaken for a valid GPU benchmark.
+On WSL, where the GPU is `/dev/dxg` rather than a render node, `--gpu` selects
+Mesa's d3d12 driver and WSL's libraries in `/usr/lib/wsl/lib`.
+
+A host can forbid software rendering for every command at once:
+`EBITENMCP_GPU=require` makes each display a GPU one, as though `--gpu` had been
+given, and never starts Xvfb or a pixman container.
+
+### One display for many commands
+
+Something that runs a suite hundreds of times, such as mutation testing or a
+gate with several workers, need not start a compositor each time:
+
+```sh
+ebitenmcp display "$XDG_RUNTIME_DIR/game-display" &   # prints unix:<that directory>/X99
+EBITENMCP_DISPLAY="unix:$XDG_RUNTIME_DIR/game-display/X99" ebitenmcp run --gpu -- go test ./...
+```
+
+`display` keeps one GPU display up until it gets SIGTERM, SIGINT or SIGHUP, the
+process that started it goes, or the server dies, and then removes what it made.
+Its socket is a file in the directory given, which must be the user's alone
+(0700), so commands running in private network namespaces reach it too; an
+abstract socket would not cross into them. `run` with `EBITENMCP_DISPLAY` set
+uses that display, always with the GPU's environment, and leaves it up. A
+display that is named and not answering is an error, never a reason to start
+another.
 
 On macOS and Windows there is nothing to arrange: a game opens its own window,
 so `run` only switches the server on and starts it.

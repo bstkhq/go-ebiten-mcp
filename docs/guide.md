@@ -153,8 +153,8 @@ ebitenmcp x status
 ebitenmcp x stop
 ```
 
-`x start` manages a separate named server for manual use; `run` always starts
-its own server and never reuses that display.
+`x start` manages a separate named server for manual use; `run` never reuses
+that display. The one display `run` does reuse is a kept one, below.
 
 The image is built on demand from a Containerfile embedded in the binary, so
 there is nothing to pull and nothing to publish. Weston covers both modes:
@@ -179,8 +179,54 @@ On an NVIDIA render node, the launcher also selects NVIDIA's GLVND GLX vendor
 for the probe and the game. Some Xwayland installations otherwise run the
 compositor on NVIDIA but silently give GLX clients llvmpipe.
 
+On WSL there is no render node: the GPU is `/dev/dxg`, which Mesa reaches
+through its d3d12 Gallium driver and the libraries WSL mounts in
+`/usr/lib/wsl/lib`. `--gpu` sets `GALLIUM_DRIVER=d3d12`, unless a driver was
+already chosen, and puts those libraries first on `LD_LIBRARY_PATH`, for the
+compositor, the probe and the game alike. A render node, where there is one,
+comes first.
+
 For scale: a real 1080x1920 game runs at 3.8 ticks per second in software and
 59.9 on a Radeon through the same path, drawing pixel-identical frames.
+
+### A host that forbids software rendering
+
+`EBITENMCP_GPU=require` is the host's policy, not a project's: the `--gpu` flag
+is in every project's commands, written by whoever wrote them, and an owner who
+has decided that software rendering produces nothing worth having cannot edit
+them all. With it, `run`, `mcp` and `x start` behave as though `--gpu` had been
+given, so a display either draws on the GPU or the command fails saying why.
+Xvfb and the pixman container are never started. Any other value is an error
+rather than a quiet "allowed".
+
+### A display kept up for many commands
+
+A compositor per command costs about half a second and a share of VRAM each
+time. `ebitenmcp display DIR` starts weston and Xwayland once, in the
+foreground, and prints the display; whoever starts it owns it.
+
+The display is a socket file in `DIR`, passed to Xwayland with `-listenfd`,
+besides the usual abstract one. That is the reason it exists in this form: an
+abstract socket belongs to one network namespace, and commands that each run
+in a private network of their own (so that their servers' ports cannot collide)
+would never reach a display started outside them. A file does not care which
+network its client is in. libxcb takes it as `DISPLAY=unix:<path>`. Weston
+closes its copy of the socket, so it stops answering as soon as the X server
+does. `DIR` has to be the user's alone, 0700, because anyone who can reach the
+socket reaches every window on the display.
+
+It stops on SIGTERM, SIGINT or SIGHUP; when its parent is no longer the process
+that started it, since an owner killed outright cannot stop it and a display
+nobody owns is VRAM nobody frees; and when the server stops answering twice in
+a row, which it reports as an error. It then stops the compositor, removes the
+socket, and removes `DIR` if it made it. It is GPU only: a software display
+that outlives its command is what the host policy exists to prevent.
+
+`run` uses the display `EBITENMCP_DISPLAY` names instead of starting one,
+always with the GPU's environment, since a game on it without that environment
+would draw on llvmpipe there all the same. It checks the renderer as any GPU run
+does and leaves the display up. A display that is named and not answering is an
+error: whoever set the variable is counting on that display.
 
 ## Golden images belong to one renderer
 

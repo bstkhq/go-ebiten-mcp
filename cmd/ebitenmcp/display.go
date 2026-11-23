@@ -57,7 +57,6 @@ func displayCommand(args []string) error {
 	screen := defaultScreen
 	rest, err := parseFlags(args, map[string]flagSpec{
 		"--screen": stringFlag(func(v string) { screen = v }),
-		"--gpu":    boolFlag(func() {}),
 	})
 	if err != nil {
 		return err

@@ -173,6 +173,11 @@ func TestAKeptDisplayDrawsOnTheGPUForAPrivateNetworkAndLeavesNothing(t *testing.
 	// the display up for the next one.
 	t.Setenv(GPUEnvName, "")
 	t.Setenv(DisplayEnvName, display)
+	// The suite runs under `ebitenmcp run --gpu`, whose variables it inherits;
+	// without this a run that forgot them would pass on its parent's.
+	for _, entry := range gpuEnvironment(nil) {
+		unsetForTest(t, strings.SplitN(entry, "=", 2)[0])
+	}
 	seen := filepath.Join(t.TempDir(), "renderer")
 	if err := runCommand([]string{"--addr", "", "--", "sh", "-c", "glxinfo -B > " + seen}); err != nil {
 		t.Fatalf("run on the kept display: %v", err)
@@ -196,4 +201,15 @@ func TestAKeptDisplayDrawsOnTheGPUForAPrivateNetworkAndLeavesNothing(t *testing.
 	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
 		t.Errorf("the directory the display made is still there: %v", err)
 	}
+}
+
+func unsetForTest(t *testing.T, key string) {
+	t.Helper()
+	old, had := os.LookupEnv(key)
+	os.Unsetenv(key)
+	t.Cleanup(func() {
+		if had {
+			os.Setenv(key, old)
+		}
+	})
 }
