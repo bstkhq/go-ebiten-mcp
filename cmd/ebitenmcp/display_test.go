@@ -3,11 +3,15 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -92,28 +96,28 @@ func TestAKeptDisplayGoesWhenAskedWhenItsOwnerGoesAndSaysSoWhenItDies(t *testing
 		t.Fatal(err)
 	}
 
-	signals := make(chan os.Signal, 1)
-	signals <- os.Interrupt
-	if err := watchWithin(t, display, os.Getppid(), signals); err != nil {
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	if err := watchWithin(t, stopped, display, os.Getppid()); err != nil {
 		t.Errorf("asked to stop: %v; want nil", err)
 	}
 
-	if err := watchWithin(t, display, -1, make(chan os.Signal)); err != nil {
+	if err := watchWithin(t, context.Background(), display, -1); err != nil {
 		t.Errorf("owner gone: %v; want nil", err)
 	}
 
 	listener.Close()
-	err = watchWithin(t, display, os.Getppid(), make(chan os.Signal))
+	err = watchWithin(t, context.Background(), display, os.Getppid())
 	if err == nil || !strings.Contains(err.Error(), "stopped answering") {
 		t.Errorf("server gone: %v; want it said", err)
 	}
 }
 
 // watchWithin fails the test rather than hang it when the watch never returns.
-func watchWithin(t *testing.T, display string, owner int, signals chan os.Signal) error {
+func watchWithin(t *testing.T, ctx context.Context, display string, owner int) error {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- watchDisplay(display, owner, signals, time.Millisecond) }()
+	go func() { done <- watchDisplay(ctx, display, owner, time.Millisecond) }()
 	select {
 	case err := <-done:
 		return err
@@ -141,7 +145,7 @@ func TestAKeptDisplayDrawsOnTheGPUForAPrivateNetworkAndLeavesNothing(t *testing.
 	}
 
 	dir := filepath.Join(t.TempDir(), "display")
-	display, stop, err := startSharedDisplay(dir, "64x64")
+	display, stop, err := startSharedDisplay(context.Background(), dir, "64x64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,4 +224,110 @@ func unsetForTest(t *testing.T, key string) {
 			os.Setenv(key, old)
 		}
 	})
+}
+
+// helperDisplayEnv makes this test binary run `ebitenmcp display` itself, for
+// the tests that have to signal a real one. Every process it starts inherits
+// it, which is how a test finds whatever a display left behind.
+const helperDisplayEnv = "EBITENMCP_TEST_DISPLAY_HELPER"
+
+func TestDisplayProcessHelper(t *testing.T) {
+	dir := os.Getenv(helperDisplayEnv)
+	if dir == "" {
+		t.Skip("run by the tests that signal a display")
+	}
+	if err := displayCommand([]string{"--screen", "64x64", dir}); err != nil {
+		fmt.Fprintln(os.Stderr, "display:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// A stop that arrived while the compositor was still starting took the
+// default action: the display process died alone, and weston and Xwayland, in
+// a process group of their own, went on drawing for nobody. The renderer probe
+// is made slow so that the signal lands inside the start, after both are up.
+func TestADisplayToldToStopWhileStartingLeavesNothing(t *testing.T) {
+	if requireHardwareRenderer(os.Getenv(rendererEnv)) != nil {
+		t.Skip("not running on a GPU display; make test-gpu runs this")
+	}
+	glxinfo, err := exec.LookPath("glxinfo")
+	if err != nil {
+		t.Skip("glxinfo is not installed")
+	}
+
+	base := t.TempDir()
+	marker := filepath.Join(base, "probing")
+	slow := filepath.Join(base, "bin")
+	if err := os.Mkdir(slow, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ntouch " + marker + "\nsleep 3\nexec " + glxinfo + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(slow, "glxinfo"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(base, "display")
+	helper := exec.Command(os.Args[0], "-test.run=^TestDisplayProcessHelper$")
+	helper.Env = append(setEnvironment(os.Environ(), "PATH", slow+string(filepath.ListSeparator)+os.Getenv("PATH")),
+		helperDisplayEnv+"="+dir)
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- helper.Wait() }()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			helper.Process.Kill()
+			t.Fatal("the display never got as far as probing its renderer")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := helper.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-exited:
+	case <-time.After(20 * time.Second):
+		helper.Process.Kill()
+		t.Fatal("the display did not stop")
+	}
+	if left := processesWith(helperDisplayEnv + "=" + dir); len(left) > 0 {
+		for _, pid := range left {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		t.Errorf("processes left running after the display stopped: %v", left)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Errorf("the display's directory is still there: %v", err)
+	}
+}
+
+// processesWith lists the processes whose environment holds entry.
+func processesWith(entry string) []int {
+	var found []int
+	all, _ := os.ReadDir("/proc")
+	for _, p := range all {
+		pid, err := strconv.Atoi(p.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		env, err := os.ReadFile(filepath.Join("/proc", p.Name(), "environ"))
+		if err != nil {
+			continue
+		}
+		for _, e := range strings.Split(string(env), "\x00") {
+			if e == entry {
+				found = append(found, pid)
+				break
+			}
+		}
+	}
+	return found
 }

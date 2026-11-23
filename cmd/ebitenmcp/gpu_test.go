@@ -37,14 +37,27 @@ func TestWSLSelectsD3D12AndPutsItsLibrariesFirst(t *testing.T) {
 
 // A driver somebody chose is theirs. If it draws in software the renderer check
 // says so; overriding it would hide what they asked for.
-func TestWSLLeavesADriverChosenByHandAndAddsItsLibrariesOnce(t *testing.T) {
-	env := wslGPUEnvironment([]string{"GALLIUM_DRIVER=llvmpipe", "LD_LIBRARY_PATH=/usr/lib/wsl/lib/"}, "/usr/lib/wsl/lib")
+func TestWSLLeavesADriverChosenByHand(t *testing.T) {
+	env := wslGPUEnvironment([]string{"GALLIUM_DRIVER=llvmpipe"}, "/usr/lib/wsl/lib")
 
 	if got, _ := lookupEnvironment(env, "GALLIUM_DRIVER"); got != "llvmpipe" {
 		t.Errorf("GALLIUM_DRIVER = %q, want the llvmpipe that was asked for", got)
 	}
-	if got, _ := lookupEnvironment(env, "LD_LIBRARY_PATH"); got != "/usr/lib/wsl/lib/" {
-		t.Errorf("LD_LIBRARY_PATH = %q, want it unchanged", got)
+}
+
+// Present is not enough: a directory ahead of WSL's with a libGL of its own
+// wins the loader's search, so WSL's comes first, once, and the rest keep
+// their order.
+func TestWSLLibrariesComeFirstOnceWhereverTheyWere(t *testing.T) {
+	for _, path := range []string{
+		"/opt/game/lib:/usr/lib/wsl/lib:/usr/local/lib",
+		"/opt/game/lib:/usr/lib/wsl/lib/:/usr/local/lib:/usr/lib/wsl/lib",
+		"/usr/lib/wsl/lib:/opt/game/lib:/usr/local/lib",
+	} {
+		env := wslGPUEnvironment([]string{"LD_LIBRARY_PATH=" + path}, "/usr/lib/wsl/lib")
+		if got, _ := lookupEnvironment(env, "LD_LIBRARY_PATH"); got != "/usr/lib/wsl/lib:/opt/game/lib:/usr/local/lib" {
+			t.Errorf("LD_LIBRARY_PATH from %q = %q, want WSL's first and the rest in order", path, got)
+		}
 	}
 }
 

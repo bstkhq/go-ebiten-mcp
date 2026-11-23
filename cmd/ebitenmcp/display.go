@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -72,34 +73,41 @@ func displayCommand(args []string) error {
 		return err
 	}
 
+	// Before anything is acquired: a stop that arrives while the compositor is
+	// still starting must take down what was started so far. Left to the
+	// default action it ended this process alone, and weston and Xwayland, in a
+	// process group of their own, outlived it and its owner.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer cancel()
+
 	owner := os.Getppid()
-	display, stop, err := startSharedDisplay(rest[0], screen)
+	display, stop, err := startSharedDisplay(ctx, rest[0], screen)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil // told to stop while starting; what it started is gone
+		}
 		return err
 	}
 	defer stop()
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(signals)
 
 	fmt.Println(display)
 	fmt.Fprintf(os.Stderr, "ebitenmcp: keeping %s up until told to stop; use it with %s=%s\n",
 		display, DisplayEnvName, display)
 
-	return watchDisplay(display, owner, signals, displayWatchInterval)
+	return watchDisplay(ctx, display, owner, displayWatchInterval)
 }
 
-// watchDisplay returns when the display should go: nil when it was asked to,
-// or its owner went, an error when the server stopped answering by itself.
-func watchDisplay(display string, owner int, signals <-chan os.Signal, every time.Duration) error {
+// watchDisplay returns when the display should go: nil when it was asked to
+// (ctx is done) or its owner went, an error when the server stopped answering
+// by itself.
+func watchDisplay(ctx context.Context, display string, owner int, every time.Duration) error {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 
 	misses := 0
 	for {
 		select {
-		case <-signals:
+		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 		}
@@ -122,8 +130,8 @@ func watchDisplay(display string, owner int, signals <-chan os.Signal, every tim
 
 // startSharedDisplay starts the compositor with a socket file in dir and
 // returns the display and how to stop it. It refuses a display that does not
-// draw on the GPU.
-func startSharedDisplay(dir, screen string) (string, func(), error) {
+// draw on the GPU, and undoes everything it did when ctx is done first.
+func startSharedDisplay(ctx context.Context, dir, screen string) (string, func(), error) {
 	width, height, err := splitScreen(screen)
 	if err != nil {
 		return "", nil, err
@@ -200,7 +208,7 @@ func startSharedDisplay(dir, screen string) (string, func(), error) {
 	}
 
 	display := path
-	if err := waitForSharedDisplay(display); err != nil {
+	if err := waitForSharedDisplay(ctx, display); err != nil {
 		artifacts, _ = captureDisplayArtifacts(number)
 		stop()
 		return "", nil, err
@@ -210,7 +218,11 @@ func startSharedDisplay(dir, screen string) (string, func(), error) {
 		return "", nil, err
 	}
 
-	found := rendererForGPU(display)
+	found := rendererWithin(ctx, display, gpuEnvironment(os.Environ()))
+	if err := ctx.Err(); err != nil {
+		stop()
+		return "", nil, err
+	}
 	if err := requireHardwareRenderer(found); err != nil {
 		stop()
 		return "", nil, err
@@ -273,12 +285,16 @@ func sharedDisplayListening(display string) bool {
 	return true
 }
 
-func waitForSharedDisplay(display string) error {
+func waitForSharedDisplay(ctx context.Context, display string) error {
 	for i := 0; i < 150; i++ {
 		if sharedDisplayListening(display) {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("display %s never came up", display)
 }

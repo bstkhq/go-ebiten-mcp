@@ -84,16 +84,16 @@ func wslGPUEnvironment(env []string, libraries string) []string {
 		env = setEnvironment(env, "GALLIUM_DRIVER", "d3d12")
 	}
 
+	// First, not merely present: a directory ahead of it with its own libGL or
+	// libdxcore wins the loader's search.
 	path, _ := lookupEnvironment(env, "LD_LIBRARY_PATH")
+	entries := []string{libraries}
 	for _, entry := range filepath.SplitList(path) {
-		if filepath.Clean(entry) == filepath.Clean(libraries) {
-			return env
+		if entry == "" || filepath.Clean(entry) != filepath.Clean(libraries) {
+			entries = append(entries, entry)
 		}
 	}
-	if path != "" {
-		libraries += string(filepath.ListSeparator) + path
-	}
-	return setEnvironment(env, "LD_LIBRARY_PATH", libraries)
+	return setEnvironment(env, "LD_LIBRARY_PATH", strings.Join(entries, string(filepath.ListSeparator)))
 }
 
 func lookupEnvironment(env []string, key string) (string, bool) {

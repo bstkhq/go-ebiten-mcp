@@ -228,12 +228,19 @@ func rendererForMode(display string, gpu bool) string {
 }
 
 func rendererWithEnvironment(display string, env []string) string {
+	return rendererWithin(context.Background(), display, env)
+}
+
+// rendererWithin is the probe under a caller's context as well as its own
+// deadline, so that a display told to stop while it is still being probed does
+// not wait for glxinfo first.
+func rendererWithin(parent context.Context, display string, env []string) string {
 	path, err := exec.LookPath("glxinfo")
 	if err != nil {
 		return "unknown (install mesa-utils to find out)"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), rendererTimeout)
+	ctx, cancel := context.WithTimeout(parent, rendererTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, path, "-B")
