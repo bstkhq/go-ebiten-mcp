@@ -210,7 +210,12 @@ besides the usual abstract one. That is the reason it exists in this form: an
 abstract socket belongs to one network namespace, and commands that each run
 in a private network of their own (so that their servers' ports cannot collide)
 would never reach a display started outside them. A file does not care which
-network its client is in. libxcb takes it as `DISPLAY=unix:<path>`. Weston
+network its client is in. The file is `DIR/X:<n>` and the display is its path,
+because that is the one form both of the game's X clients read alike: libxcb,
+under libX11, takes a `DISPLAY` that starts with a slash as the socket, and
+jezek/xgb, which Ebitengine opens to measure the monitor, takes `<socket>:<n>`
+as the file `<socket>:<n>`; `unix:<path>`, which libxcb also accepts, makes xgb
+panic before the game starts. Weston
 closes its copy of the socket, so it stops answering as soon as the X server
 does. `DIR` has to be the user's alone, 0700, because anyone who can reach the
 socket reaches every window on the display.

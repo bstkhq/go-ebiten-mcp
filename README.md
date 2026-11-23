@@ -149,8 +149,8 @@ Something that runs a suite hundreds of times, such as mutation testing or a
 gate with several workers, need not start a compositor each time:
 
 ```sh
-ebitenmcp display "$XDG_RUNTIME_DIR/game-display" &   # prints unix:<that directory>/X99
-EBITENMCP_DISPLAY="unix:$XDG_RUNTIME_DIR/game-display/X99" ebitenmcp run --gpu -- go test ./...
+ebitenmcp display "$XDG_RUNTIME_DIR/game-display" &   # prints <that directory>/X:99
+EBITENMCP_DISPLAY="$XDG_RUNTIME_DIR/game-display/X:99" ebitenmcp run --gpu -- go test ./...
 ```
 
 `display` keeps one GPU display up until it gets SIGTERM, SIGINT or SIGHUP, the

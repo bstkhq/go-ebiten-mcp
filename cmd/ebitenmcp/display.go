@@ -29,7 +29,7 @@ import (
 // it owns it: `ebitenmcp run` with EBITENMCP_DISPLAY set uses it and never
 // stops it.
 //
-// The display is a socket file in DIR, unix:DIR/X<n>, as well as the abstract
+// The display is a socket file in DIR, DIR/X:<n>, as well as the abstract
 // socket every display here has. An abstract socket belongs to one network
 // namespace, so a command run in a private network of its own could not reach
 // it; a file does not care which network its client is in.
@@ -40,9 +40,13 @@ import (
 // DisplayEnvName is the display `run` reuses, as `ebitenmcp display` prints it.
 const DisplayEnvName = wire.DisplayEnv
 
-// sharedDisplayPrefix is how libxcb is given a socket by path rather than by
-// number. libX11 passes the name through to it.
-const sharedDisplayPrefix = "unix:"
+// A kept display is named by its socket's path, and the file is called X:<n>
+// so that the path is a DISPLAY both kinds of client read the same way: libxcb
+// (through libX11, for GLFW and Mesa) takes a DISPLAY that starts with a slash
+// as the socket itself, and jezek/xgb, which Ebitengine also opens to measure
+// the monitor, takes "<socket>:<n>" as the file "<socket>:<n>". The unix:<path>
+// form libxcb also accepts makes xgb panic before the game starts.
+const sharedSocketName = "X:"
 
 // How often the display and its owner are looked at. A second is short enough
 // that nothing is left drawing for long after its owner is gone, and long
@@ -147,7 +151,7 @@ func startSharedDisplay(dir, screen string) (string, func(), error) {
 		unmake()
 	}
 
-	path := filepath.Join(dir, "X"+strings.TrimPrefix(number, ":"))
+	path := filepath.Join(dir, sharedSocketName+strings.TrimPrefix(number, ":"))
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		release()
@@ -195,7 +199,7 @@ func startSharedDisplay(dir, screen string) (string, func(), error) {
 		release()
 	}
 
-	display := sharedDisplayPrefix + path
+	display := path
 	if err := waitForSharedDisplay(display); err != nil {
 		artifacts, _ = captureDisplayArtifacts(number)
 		stop()
@@ -250,9 +254,8 @@ func privateDirectory(dir string) (bool, error) {
 // named and not there is an error, never a reason to start another: whoever set
 // it is counting on that one display, and on what it renders with.
 func sharedDisplay(display string) (string, error) {
-	path, ok := strings.CutPrefix(display, sharedDisplayPrefix)
-	if !ok || !filepath.IsAbs(path) {
-		return "", fmt.Errorf("%s must be unix:<absolute path to the socket>, as `ebitenmcp display` prints it, not %q",
+	if !filepath.IsAbs(display) || !strings.HasPrefix(filepath.Base(display), sharedSocketName) {
+		return "", fmt.Errorf("%s must be the absolute path of the socket, .../X:<n>, as `ebitenmcp display` prints it, not %q",
 			DisplayEnvName, display)
 	}
 	if !sharedDisplayListening(display) {
@@ -262,7 +265,7 @@ func sharedDisplay(display string) (string, error) {
 }
 
 func sharedDisplayListening(display string) bool {
-	conn, err := net.DialTimeout("unix", strings.TrimPrefix(display, sharedDisplayPrefix), 100*time.Millisecond)
+	conn, err := net.DialTimeout("unix", display, 100*time.Millisecond)
 	if err != nil {
 		return false
 	}

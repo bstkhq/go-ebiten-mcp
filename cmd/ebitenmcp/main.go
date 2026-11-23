@@ -76,7 +76,7 @@ The display, when there is none:
   display [--screen WxH] DIR
                            keep one GPU display up for many commands, with its
                            socket in DIR so that commands in private networks
-                           reach it too. Prints unix:DIR/X<n>; set
+                           reach it too. Prints DIR/X:<n>; set
                            EBITENMCP_DISPLAY to that and run uses it. Stops on
                            SIGTERM, or when the process that started it goes
 

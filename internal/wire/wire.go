@@ -39,8 +39,8 @@ const RendererEnv = "EBITENMCP_RENDERER"
 // a display that would draw in software is never started.
 const GPUEnv = "EBITENMCP_GPU"
 
-// DisplayEnv names a display that `ebitenmcp display` keeps up, as
-// unix:<path>. `ebitenmcp run` uses it instead of starting one of its own and
+// DisplayEnv names a display that `ebitenmcp display` keeps up, by the path
+// of its socket. `ebitenmcp run` uses it instead of starting one of its own and
 // leaves it running when the command ends.
 const DisplayEnv = "EBITENMCP_DISPLAY"
 

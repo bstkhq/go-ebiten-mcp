@@ -16,17 +16,17 @@ import (
 // renders with. One that is named and not there must stop the command, not
 // start a display of its own behind the owner's back.
 func TestAKeptDisplayIsUsedOnlyWhenItIsAnAbsoluteSocketThatAnswers(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "X99")
+	path := filepath.Join(t.TempDir(), "X:99")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
 
-	if got, err := sharedDisplay("unix:" + path); err != nil || got != "unix:"+path {
+	if got, err := sharedDisplay(path); err != nil || got != path {
 		t.Errorf("sharedDisplay(listening) = %q, %v; want it used", got, err)
 	}
-	for _, display := range []string{path, "unix:X99", ":99", "unix:" + path + "-gone"} {
+	for _, display := range []string{"unix:" + path, "X:99", ":99", path + "0"} {
 		if _, err := sharedDisplay(display); err == nil {
 			t.Errorf("sharedDisplay(%q) was accepted", display)
 		}
@@ -39,7 +39,7 @@ func TestRunRefusesTwoNamedDisplays(t *testing.T) {
 	if !usesDisplay {
 		t.Skip("this platform has no X display")
 	}
-	t.Setenv(DisplayEnvName, "unix:/nowhere/X99")
+	t.Setenv(DisplayEnvName, "/nowhere/X:99")
 
 	err := runCommand([]string{"--display", ":98", "--", "true"})
 	if err == nil || !strings.Contains(err.Error(), "give one") {
@@ -86,12 +86,11 @@ func TestTheDisplaysDirectoryIsThisUsersAlone(t *testing.T) {
 // A display nobody owns is VRAM nobody frees, and one whose server died must
 // not be reported as kept up.
 func TestAKeptDisplayGoesWhenAskedWhenItsOwnerGoesAndSaysSoWhenItDies(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "X99")
-	listener, err := net.Listen("unix", path)
+	display := filepath.Join(t.TempDir(), "X:99")
+	listener, err := net.Listen("unix", display)
 	if err != nil {
 		t.Fatal(err)
 	}
-	display := "unix:" + path
 
 	signals := make(chan os.Signal, 1)
 	signals <- os.Interrupt
@@ -167,6 +166,15 @@ func TestAKeptDisplayDrawsOnTheGPUForAPrivateNetworkAndLeavesNothing(t *testing.
 	}
 	if err := requireHardwareRenderer(found); err != nil {
 		t.Errorf("from a private network: %v", err)
+	}
+
+	// A game, not a probe: Ebitengine opens the display twice, through libX11 for
+	// GLFW and through jezek/xgb to measure the monitor, and the second read the
+	// first form this display was given as a panic before any test ran.
+	game := exec.Command("unshare", "-rn", "go", "test", "-count=1", "-run", "^TestTicksAdvance$", modulePath)
+	game.Env = setEnvironment(gpuEnvironment(os.Environ()), "DISPLAY", display)
+	if out, err := game.CombinedOutput(); err != nil {
+		t.Fatalf("an Ebitengine test on the kept display, from a private network: %v\n%s", err, out)
 	}
 
 	// A command that did not ask for the GPU still draws on it here, and leaves
